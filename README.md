@@ -1,261 +1,418 @@
 # swingbot
 
-A broker-independent **weekly swing-trading** research and signal system for Indian (NSE)
-and US equities, with news-assisted return prediction.
+A **weekly swing-trading** signal system for Indian (NSE) and US equities. It reads price
+history and news, and once a week tells you what to buy and sell. It does not place trades
+for you, does not connect to your broker, and never needs your broker password or API keys.
+You take its output and place the trades yourself, on whatever platform you already use.
 
-No intraday. Decisions are made once a week at the close, filled at the next open, and
-held for a configurable number of sessions (five by default).
+No intraday. It decides once a week (Friday close), you trade the next session's open, and
+you hold for about a week before the next signal replaces it.
 
----
-
-## What this is, and what it is not
-
-This is not a bot that promises returns. It is the machinery that tells you honestly
-whether a weekly signal is real: point-in-time correctness, purged cross-validation,
-realistic transaction costs, and null-model baselines you have to beat before believing
-anything.
-
-Generating a signal is the easy part. Knowing whether it survives costs, overlapping
-labels, survivorship bias and your own multiple testing is the hard part, and that is
-what most of this codebase is.
-
-**It never touches a broker.** The core computes target positions and writes order files.
-A single protocol, `ExecutionAdapter`, is the only place a broker could ever attach, and
-a test fails the build if anything else imports a broker SDK.
+If you've never used a command line before, this doc explains everything from scratch.
 
 ---
 
-## The 90/10 design: what the AI does
+## What this actually does, in plain terms
 
-An LLM asked to predict a price is doing the thing it is worst at, and the result cannot
-be backtested honestly because the outcome of any historical article is already inside
-the language model's training data. A backtest over past news would measure memorisation,
-not edge.
+Once a week, you run one command. It looks at:
 
-So the forecast is an explicit two-block blend:
+- **Price history** — how each stock has been trending, its momentum, volatility, and
+  chart patterns (moving averages, RSI, breakouts, and so on).
+- **Recent news** — headlines about each company, scored for whether they're good or bad
+  news, and how big a deal they are.
+
+It combines the two — about 90% weight on price/chart signals, 10% on news — and picks a
+handful of stocks to go long (buy) and, optionally, a handful to go short (bet against). It
+writes that list to a plain CSV file. **You** read that file and place the trades on your
+own broker's app or website. The program never touches your money or your account.
+
+**Why isn't it fully automatic?** Because full automation to a live broker is a much bigger
+trust step than most beginners should take with a system they just downloaded. This gives
+you the signal and a clear checklist; you stay in control of every trade.
+
+---
+
+## Before you start: read this
+
+- **This is not investment advice**, and it is not a guaranteed money-maker. It is a
+  structured way to generate and check trading ideas. Treat every number it prints with
+  suspicion until you've watched it on paper for a while.
+- **Start on paper.** Run it for several weeks writing down what it would have told you to
+  do, without placing real trades, so you can see whether you'd have followed it and how it
+  behaves.
+- **Nothing here needs your broker login, password, or API key.** If a tool ever asks you
+  to type your broker credentials into this system, that is not this project — stop and
+  check.
+- **Weekly, not daily.** If you're expecting to watch a screen all day, this isn't that. You
+  check it once a week, place a handful of trades, and leave it alone until next week.
+
+---
+
+## What you need before you begin
+
+- A computer (Mac, Windows, or Linux) you can install software on.
+- **Python 3.11 or newer.** Check with `python3 --version` in a terminal. If you don't have
+  it, install it from [python.org](https://www.python.org/downloads/) — on Windows, tick
+  "Add Python to PATH" during install.
+- **Git**, to download the code. Check with `git --version`. Get it from
+  [git-scm.com](https://git-scm.com/downloads) if needed.
+- A brokerage account with **any** broker — this system doesn't care which one.
+- About 15 minutes for the first-time setup.
+
+Every command below is typed into a terminal (Terminal on Mac, PowerShell or Command
+Prompt on Windows, any shell on Linux) — not into the code editor, not into your browser.
+
+---
+
+## Step 1: Get the code and install it
+
+```bash
+git clone https://github.com/pratapsisodiya/python swingbot
+cd swingbot
+
+# Create an isolated Python environment so this doesn't interfere with anything else
+# on your machine, and activate it.
+python3 -m venv .venv
+source .venv/bin/activate          # on Windows (PowerShell): .venv\Scripts\Activate.ps1
+
+# Install swingbot and its dependencies
+pip install -e ".[dev,gbdt]"
+```
+
+`.venv/bin/activate` needs to be run again every time you open a new terminal window to
+work on this. You'll know it worked because your terminal prompt will show `(.venv)` at
+the start of the line.
+
+Check it installed correctly:
+
+```bash
+swingbot doctor --market us
+```
+
+This prints a checklist — installed packages, data status, cost assumptions — and should
+run without errors even before you've added any data.
+
+---
+
+## Step 2: See it work, with no real data (5 minutes)
+
+Before you touch real money or real market data, run the whole pipeline on made-up data so
+you can see what each step produces. This is entirely offline and completely safe —
+nothing here is a real prediction, it's a demonstration.
+
+```bash
+# Generates a fake market and fake news with a made-up pattern baked in, then confirms
+# the system can find that pattern. This step can take a few minutes.
+swingbot demo --market us --years 8
+
+# Backtests the strategy against several "dumb" comparisons (a coin flip, holding
+# everything equally, etc.) so you can see whether it's actually better than nothing.
+swingbot backtest --market us --ablation
+
+# Generates this week's fake target trade list.
+swingbot signal --market us --no-notify
+```
+
+That last command writes files into a new folder under `runs/` — look for
+`runs/<timestamp>-us-signal-.../orders.csv`. Open it in Excel, Google Sheets, or a text
+editor. That CSV is exactly the file format you'll use with real money later, just built
+from fake data. Get comfortable reading it now.
+
+Also open the `tearsheet.html` file from the `backtest` step in a web browser — it's a
+plain HTML file, just double-click it. It shows charts and a table comparing the strategy
+against simple baselines, and a plain-English verdict at the top telling you whether the
+result looks real or looks like noise.
+
+---
+
+## Step 3: Point it at a real market
+
+Two markets are supported out of the box: `us` (US stocks) and `india` (NSE stocks). Pick
+one with `--market us` or `--market india` on every command (`in` and `nse` also work for
+India).
+
+You need real daily price history for the stocks you want to trade. The simplest and most
+reliable way, whatever broker or data source you have access to, is a CSV file per stock:
+
+1. Export or download daily price history for each stock you're interested in. You need
+   at least these columns: **date, open, high, low, close, volume.** Almost any broker,
+   data vendor, or free source (Yahoo Finance's historical-data export, for example) can
+   give you this as a CSV or spreadsheet.
+2. Save one file per stock at `data/<market>/csv/<TICKER>.csv` — for example
+   `data/us/csv/AAPL.csv` or `data/india/csv/RELIANCE.csv`. The ticker in the filename
+   must match the ticker in `config/universe/sp500.csv` (US) or
+   `config/universe/nifty200.csv` (India).
+3. You need **at least 2 years** of daily history per stock for the models to have enough
+   to learn from; more is better.
+
+Then build features and run a real backtest:
+
+```bash
+swingbot backtest --market us --ablation --sensitivity
+```
+
+Read the verdicts printed at the end before doing anything else. If it says the pipeline
+looks like it's leaking information from the future, or that the strategy doesn't beat
+simple momentum, or that costs eat all the profit — believe it. That is the entire point
+of this system: it is built to tell you when an idea doesn't hold up, not to talk you into
+trading it anyway.
+
+**About the included stock lists:** `config/universe/sp500.csv` and
+`config/universe/nifty200.csv` are provided so you have something to start with, but they
+are *today's* company lists, not history of which companies were in the index at each
+past date. That makes a backtest look a little better than reality would have been,
+because it silently excludes companies that later went bankrupt or got removed. The
+tearsheet says this explicitly ("survivorship-biased"). It doesn't stop you from using the
+system, but don't take the backtest numbers as gospel until you fix this.
+
+---
+
+## Step 4: Get your weekly trade list, and place it with your broker
+
+This is the part you'll actually do every week, and the part that connects to your trading
+platform. Run this after the market closes on Friday (or your market's last trading day of
+the week):
+
+```bash
+swingbot signal --market us --equity 50000 --no-notify
+```
+
+`--equity` is roughly how much money (in your market's currency) you want this strategy to
+manage — the position sizes scale to it. Adjust it to a small, comfortable amount while
+you're starting out; you are not required to size positions to your full account.
+
+This prints a table of positions and writes an `orders.csv` file — the path is printed at
+the end, something like `runs/20260907-us-signal-.../orders.csv`. Open it. It looks like
+this:
+
+| ticker | side | quantity | order_type | instrument | est_price | est_value |
+|---|---|---|---|---|---|---|
+| AAPL | buy | 34 | market | equity | 190.50 | 6,477.00 |
+| XYZ | sell | 12 | market | equity | 88.10 | 1,057.20 |
+
+Here's what each column means, in plain terms:
+
+- **ticker** — the stock's symbol, exactly as your broker lists it.
+- **side** — `buy` to open or add to a long position, `sell` to close a long or open a
+  short.
+- **quantity** — how many shares. Already rounded to a whole share count for you.
+- **instrument** — almost always `equity`, meaning a normal stock trade. On the India
+  market a short position shows `futures` instead — see the callout below, this changes
+  *where* you place that trade.
+- **est_price / est_value** — the price used to size the trade and the approximate money
+  amount. Your broker's actual fill price may differ slightly; that's normal and expected.
+
+### Placing these trades with your broker
+
+Every broker is different, but they all support one of these two ways, and this file works
+for both:
+
+**Option A — bulk / basket order upload.** Many brokers let you upload a spreadsheet of
+orders instead of clicking through each one (sometimes called a "basket order", "bulk
+order", or "bracket upload"). Look for this in your broker's order screen or app settings.
+Their upload almost certainly expects different column names or an order than
+`orders.csv` uses, so open both `orders.csv` and your broker's template side by side in a
+spreadsheet, and copy the ticker/side/quantity values across into your broker's expected
+columns. Check your broker's help pages for "bulk order upload" or "basket order CSV" to
+find their exact template.
+
+**Option B — enter each trade by hand.** This always works, on every broker, with no setup.
+Open `orders.csv`, and for each row: open your broker's trade screen, enter the ticker,
+choose buy or sell, type in the quantity, and place a market order (or a limit order near
+`est_price` if you prefer more control over the fill price). With 10–15 positions this
+takes a few minutes.
+
+Either way, place the trades as close to the next session's open as you reasonably can —
+that's the price the whole system's math is built around.
+
+### If you see `instrument: futures` (India only)
+
+Indian stock exchanges don't allow you to hold a plain stock (equity) short overnight — you
+can only sell a stock short if you already own it, or close it the same day. So when the
+strategy wants to bet *against* a stock for a week, it has to do that using that stock's
+**futures contract** instead of the plain stock. This shows up as `instrument: futures` with
+a negative quantity/short side in your target book.
+
+To place this trade, you need **F&O (futures & options) trading enabled** on your account
+— it's a separate permission from plain stock trading that most Indian brokers require you
+to activate (usually a quick form plus meeting an income/net-worth eligibility check). Then
+place the trade on your broker's **futures** order screen for that stock, not the regular
+equity screen — searching the ticker there will show you the current-month contract.
+
+If you don't want to deal with futures at all, that's completely fine — just skip every row
+where `instrument` is `futures`, or turn shorting off entirely so the strategy only ever
+gives you plain stock buys:
+
+```bash
+swingbot signal --market india --set market_profile.short_instrument=none
+```
+
+### Keeping track from week to week
+
+Every time you run `swingbot signal`, it remembers what it told you to hold last time (in
+`runs/<...>/positions.json`) and only tells you what *changed* — new positions to open,
+old ones to close, and any resized. It assumes you actually placed last week's trades. If
+you skipped one, or your broker filled you at a very different price, place a comment in
+your own notes; the file just assumes you followed through.
+
+---
+
+## The weekly habit
+
+Once you're comfortable with the manual steps above, this is the whole loop, every week:
+
+```bash
+swingbot run-weekly --market us
+```
+
+This refreshes prices, pulls in the latest news, and runs `signal` in one step. Do this
+once, after the close, on your market's last trading day of the week. Some people set this
+to run automatically with a scheduler (`cron` on Mac/Linux, Task Scheduler on Windows) —
+but running it by hand for the first several weeks, and reading the output each time, is
+the better habit while you're learning how it behaves.
+
+---
+
+## Safety checklist before you use real money
+
+- [ ] Ran the demo (Step 2) and understood what `orders.csv` and the tearsheet show.
+- [ ] Backtested on real historical data for your market (Step 3) and read the verdicts —
+      especially the "leak check" and "does news help" lines.
+- [ ] Understand the survivorship-bias warning and, ideally, replaced the universe file
+      with one that includes delisted companies before trusting the numbers.
+- [ ] Paper-traded (wrote down, but didn't place) at least 4–6 weeks of signals and
+      compared them to what actually happened.
+- [ ] Started with a small `--equity` amount, well below your full account.
+- [ ] Understand that a short position on India shows as `futures` and needs F&O trading
+      enabled, or have turned shorting off.
+- [ ] Never given this system, or anyone claiming to be it, your broker password or API
+      key.
+
+---
+
+## Everything else (for when you want to go deeper)
+
+The sections below are for understanding *why* the system is built the way it is, and how
+to change its settings. You don't need any of this to place your first trade.
+
+### It never touches a broker — by design
+
+The core computes target positions and writes plain files. A single interface,
+`ExecutionAdapter`, is the only place a broker connection could ever attach, and an
+automated test fails the project's build if any other part of the code even imports a
+broker library. That's not a policy, it's enforced by a test every time the code changes.
+
+### The 90/10 design: what the AI does and doesn't do
+
+An AI model asked to predict a stock's price directly is doing the thing large language
+models are worst at, and you couldn't trust a backtest of it anyway — the model may already
+"remember" what happened to a stock after an old news article, from its own training data.
+
+So the forecast is two separate pieces added together, not one model looking at everything:
 
 ```
 score = 0.90 * rank(price_model.predict(price + technical + chart features))
       + 0.10 * rank(news_model.predict(news features))
 ```
 
-- The **price block** does the real work. Momentum, mean reversion, volatility, and chart
-  structure across the whole universe, trained on forward returns.
-- The **news block** is a language model reading articles and emitting typed facts:
-  event type, sentiment magnitude, expected direction, confidence, affected entity, and
-  whether the item is speculative or a rehash. Text in, JSON out. No prices in the
-  prompt, no knowledge of what happened afterwards.
+- The **price piece** does the real work — momentum, mean reversion, volatility, chart
+  structure — trained on what actually happened next, historically.
+- The **news piece** is a language model reading articles and pulling out structured facts:
+  what kind of event this is, how positive or negative, how big a deal, whether it's
+  confirmed or just a rumour. Text in, structured facts out — never a price prediction.
 
-Keeping the blocks separate is what makes the split auditable. The report prints each
-block's realised contribution, and the ablation measures whether news earns its 10
-percent at all.
+The report always shows how much each piece actually contributed, and the backtest
+specifically checks whether the news piece is earning its 10% weight or just adding noise.
 
-### Not bound to any one AI provider
+### Not locked to any one AI provider
 
-The news layer is a protocol with four interchangeable backends, chosen in config:
+The news-reading step works with any of four interchangeable options, picked in config:
 
-| Backend | Needs a key | Notes |
+| Backend | Needs an API key | Notes |
 | --- | --- | --- |
-| `lexicon` | no | Financial sentiment lexicon, offline, the default |
-| `openai_compat` | yes | Any OpenAI-shaped endpoint: OpenAI, Groq, Together, OpenRouter, or a local Ollama or LM Studio server via `base_url` |
+| `lexicon` | no | Built-in financial word list, fully offline — **this is the default** |
+| `openai_compat` | yes | Any OpenAI-style API: OpenAI itself, or a local model server like Ollama |
 | `anthropic` | yes | Claude |
-| `finbert` | no | Local transformer, optional extra, fully offline |
+| `finbert` | no | A local, free sentiment-reading model, fully offline |
 
-All four return the same `NewsAnalysis` object, so swapping one never touches anything
-downstream. **The system works out of the box with no API key.**
+The system works immediately with no API key at all, using the built-in word list. The
+other options can read news more subtly, at the cost of needing an account and key.
 
----
-
-## Install
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-
-# optional extras
-pip install -e ".[gbdt]"        # LightGBM, recommended
-pip install -e ".[yahoo]"       # live price download
-pip install -e ".[anthropic]"   # Claude news backend
-pip install -e ".[openai]"      # any OpenAI-compatible backend
-```
-
-Without LightGBM the system falls back to scikit-learn's gradient booster automatically.
-
----
-
-## Quick start
-
-Everything below runs offline on generated data, so you can see the whole pipeline work
-before wiring up a data source.
-
-```bash
-# 1. Generate a synthetic market with a known, injected signal
-swingbot demo --market us --years 8
-
-# 2. Build features and labels
-swingbot featurize --market us
-
-# 3. Walk-forward train and backtest, with every null model for comparison
-swingbot backtest --market us --ablation
-
-# 4. This week's target book, as order files
-swingbot signal --market us
-
-# 5. The report
-swingbot report --market us --open
-```
-
-`swingbot doctor` checks the environment, data coverage, calendar sanity and cache state.
-
-### Real data
-
-```bash
-swingbot fetch prices --market india --start 2015-01-01
-swingbot fetch news   --market india --lookback 30d
-swingbot analyze news --market india --backend lexicon
-```
-
-Price providers are tried in order and fall back: `csv`, `yahoo`, `stooq`, `synthetic`.
-To use your own data, drop CSVs with columns `session,open,high,low,close,volume` into
-`data/<market>/csv/<TICKER>.csv` and the `csv` provider picks them up. That path always
-works, whatever your broker or vendor.
-
----
-
-## The weekly loop
-
-```bash
-swingbot run-weekly --market india
-```
-
-Fetches the incremental week, analyses new articles, builds the feature row, loads the
-pinned model, constructs the target book, diffs it against current positions, writes
-`orders.csv` and `targets.json`, sends Telegram and email, and regenerates the report.
-
-Schedule it after Friday's close:
-
-```cron
-# 17:00 IST Friday
-0 17 * * 5 cd /path/to/swingbot && .venv/bin/swingbot run-weekly --market india
-```
-
-It refuses to run on stale data, on a feature-schema mismatch, or while the drawdown
-kill-switch is armed.
-
----
-
-## Rigor, concretely
-
-This is the part that matters.
-
-**Point in time.** Every row carries `available_at`. A `PITGuard` wraps every feature
-transformer and raises if any input is newer than the decision time. News availability is
-`max(published_at, first_seen_at)`, so a source that backdates its stamps cannot hand the
-backtest free information. An article stamped exactly at the cutoff is excluded, and that
-boundary has its own test.
-
-**The look-ahead regression test.** For sampled decision dates, features are built from
-the full panel and again from a panel physically truncated after that date, then asserted
-identical. It is parametrised over every registered transformer individually. A
-full-sample scaler, a rank across all dates, a retroactively adjusted price, or a
-forward-fill that crosses the cutoff all fail it. Transformers are auto-discovered, so a
-leaky feature cannot be added unnoticed.
-
-**Leak canaries.** Shuffled labels must produce an information coefficient near zero. A
-deliberately cheating variant, news shifted one week forward, must score materially
-higher than the honest one, proving the news path is live rather than inert. The honest
-variant must score above zero, proving the pipeline is not silently broken.
-
-**Purged walk-forward.** Every sample carries its label span. Training samples whose span
-overlaps the test window are dropped, and an embargo is applied afterwards because
-features are serially correlated and leak backwards too. Overlapping labels get
-uniqueness weights so the same week is not counted five times.
-
-**Costs are per-market and real.** India charges brokerage, STT both sides, exchange
-fees, stamp duty and GST, and prices its shorts as single-stock futures with roll and
-carry. The US charges commission, regulatory sell fees and stock borrow. Both add a
-half-spread estimated from the stock's own high-low range and a square-root impact term
-scaled by participation in average daily volume. The report includes a sensitivity sweep
-at 0.5x, 1x, 2x and 3x. A strategy that dies at 2x is not real.
-
-**Shorting is modelled honestly.** NSE cash-segment delivery cannot be held short
-overnight, so the India profile expresses shorts as single-stock futures and says so in
-every report. Set `short_instrument: none` for long-only.
-
-**Survivorship.** The universe is a membership file with start and end dates that retains
-delisted names, and a delisting books a terminal loss. If you supply only a current
-snapshot, the report is stamped survivorship-biased rather than quietly inflated.
-
-**Null models.** `swingbot backtest --ablation` runs the whole matrix in one command:
-benchmark buy-and-hold, equal-weight, flat, random-sign at matched turnover, shuffled
-labels, momentum-only, price-only, price-plus-news, news-only. The headline number for
-whether news helps is the Sharpe *difference* between price-plus-news and price-only with
-a bootstrap confidence interval, never the absolute Sharpe of the full model.
-
-**Multiple testing.** A trial ledger records every backtest ever run with its config hash
-and result. Deflated Sharpe is computed against that real count, so the configurations
-that did not work cannot be quietly forgotten.
-
-**Risk.** Inverse-volatility sizing scaled to a target portfolio volatility, a fractional
-Kelly cap, hard per-name and sector caps, gross and net exposure limits, a no-trade band
-that skips small rebalances, and a drawdown kill-switch that halves gross at 8 percent
-and flattens at 15 percent. The kill-switch runs inside the backtest loop, so its cost is
-measured rather than assumed.
-
----
-
-## Layout
+### Layout
 
 ```
-config/          layered YAML: base, per-market, per-profile, universe membership
+config/          settings: overall defaults, per-market rules, stock lists
 src/swingbot/
-  config.py      layered config, secrets from env only, reproducibility hash
-  pit.py         the point-in-time firewall
-  calendars.py   the weekly decision grid
-  data/          price providers, PIT universe, corporate actions, resampling
-  news/          RSS ingest, dedupe, the four analyzer backends
-  features/      price, technical, chart patterns, cross-sectional, news, labels
-  model/         ridge, gradient boosting, baselines, the 90/10 blender
-  validation/    purged walk-forward, metrics, information coefficient, deflated Sharpe
-  portfolio/     sizing, long-short construction, risk limits, capacity
-  backtest/      the weekly fill engine, per-market costs, ablation
-  report/        HTML tearsheet
-  execution/     ExecutionAdapter, CSV and JSON output, paper book
-tests/           look-ahead, leak canaries, purge correctness, cost, limits, architecture
+  config.py       settings loader
+  pit.py          the "no looking into the future" safety check
+  calendars.py    the weekly decision schedule
+  data/           price loading, stock list handling, corporate actions
+  news/           news fetching, de-duplication, the four AI reading options
+  features/       price/chart/technical signals, news signals, labels
+  model/          the prediction models and the 90/10 combiner
+  validation/      the "is this actually working" statistical tests
+  portfolio/      turns predictions into position sizes, applies risk limits
+  backtest/       the historical simulation engine and cost model
+  report/         the HTML report you open in a browser
+  execution/      writes orders.csv / targets.json — the only broker-facing part
+tests/            the automated checks that catch bugs like this
 ```
 
----
+### Configuration
 
-## Configuration
-
-Layers, later wins:
+Settings are layered — later ones win:
 
 ```
 config/base.yaml -> config/markets/<market>.yaml -> config/profiles/<profile>.yaml
-                 -> environment -> --set
+                 -> environment variables -> --set on the command line
 ```
+
+Example — trade more/fewer stocks, or change the news weight, without editing any files:
 
 ```bash
 swingbot backtest --market india --set portfolio.n_long=10 --set model.blend.news_weight=0.2
-SWINGBOT__PORTFOLIO__TARGET_VOL_ANNUAL=0.10 swingbot backtest --market us
 ```
 
-Secrets come from the environment only and never enter a config file or the config hash:
+API keys and any other secrets are read only from your terminal's environment variables,
+never written into a settings file:
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,
 `SMTP_USERNAME`, `SMTP_PASSWORD`.
 
----
+### Why the rigor matters — the checks this system runs on itself
 
-## Expectations, stated up front
+Generating a buy/sell list is the easy part of a project like this. The hard part —
+and most of this codebase — is checking honestly whether that list means anything:
 
-With roughly 500 weekly observations and cross-sectionally correlated names, the
-effective sample is small. A gross information coefficient of 0.02 to 0.04 is a *good*
-result at this horizon, and costs plus turnover can consume most of it. That is exactly
-why the no-trade band, the cost sweep, the price-only denominator and the deflated Sharpe
-exist rather than being bolted on at the end.
+- **No looking into the future.** Every price and news item is timestamped, and the system
+  physically cannot see anything dated after the moment it's making a decision for. This
+  is checked by an automated test that rebuilds every signal with future data deleted, and
+  confirms the answer doesn't change.
+- **Fake-signal checks.** The system is tested against data with the "correct answer"
+  scrambled, and it must find nothing. It's also tested against data with a fake, known
+  pattern deliberately inserted, and it must find that. Both checks currently pass.
+- **Realistic trading costs.** Brokerage, taxes, and the cost of your own trade moving the
+  price are all modelled per-market, not ignored. The report also shows what happens if
+  real costs turn out to be two or three times the assumption — a strategy that only
+  works at today's exact assumed cost isn't a real strategy.
+- **Compared against doing nothing clever.** Every backtest also runs a coin-flip
+  portfolio, a buy-everything-equally portfolio, and a couple of other "dumb" baselines,
+  so you can see whether the strategy is actually earning its complexity.
+- **Honest about small sample sizes.** A few hundred weeks of history isn't a lot of data,
+  statistically, and the report's confidence intervals and significance numbers reflect
+  that rather than overstating certainty.
 
-Nothing here is investment advice. Run it on paper for a long time before it touches
-money.
+None of this guarantees profit. It's the difference between a system that can tell you
+"this doesn't work, don't trade it" and one that will always say yes.
+
+### Expectations, honestly
+
+With a few hundred weeks of data and stocks that move together to some degree, the
+effective amount of independent information is small. A "good" result at this timeframe
+looks modest by design, and trading costs can eat a meaningful chunk of any edge. That's
+why the safety checks above exist rather than being an afterthought.
+
+**Nothing in this project is investment advice.** Paper trade for a meaningful stretch of
+time before it touches real money, and never risk more than you can afford to lose.
 
 ## Licence
 
