@@ -1,0 +1,48 @@
+# Indian equities (NSE) profile.
+#
+# Note on shorting. NSE cash-segment delivery cannot be held short overnight, so a
+# weekly short is only expressible through single-stock futures (or an index hedge).
+# short_instrument records that assumption and the cost model charges futures-style
+# costs plus a carry on the short sleeve. Set short_instrument: none for long-only.
+market_profile:
+  name: india
+  display_name: "Indian Equities (NSE)"
+  currency: INR
+  timezone: Asia/Kolkata
+  close_local_time: "15:30"
+  symbol_suffix: ".NS"
+  benchmark: "^NSEI"
+  allow_short: true
+  short_instrument: futures
+
+universe:
+  file: config/universe/nifty200.csv
+
+news:
+  rss:
+    hl: en-IN
+    gl: IN
+    ceid: "IN:en"
+
+costs:
+  # Long sleeve is cash-segment delivery. Figures in basis points of notional.
+  commission_bps: 3.0             # discount-broker delivery brokerage, conservative
+  min_commission: 0.0
+  regulatory_sell_bps: 0.0
+  min_half_spread_bps: 3.0        # NSE mid-caps are wider than US large caps
+  spread_from_range_factor: 0.020   # NSE mid-caps run roughly twice the US spread
+  impact_k: 0.6
+  # Securities Transaction Tax: 0.1% each side on delivery equity.
+  stt_buy_bps: 10.0
+  stt_sell_bps: 10.0
+  stamp_duty_bps: 1.5             # 0.015%, buy side only
+  exchange_bps: 0.30              # NSE transaction charge plus SEBI turnover fee
+  gst_rate: 0.18                  # on brokerage plus exchange charges
+  # Short sleeve is single-stock futures.
+  futures_commission_bps: 2.0
+  futures_stt_sell_bps: 2.0       # 0.02% on the sell side of futures
+  futures_exchange_bps: 0.20
+  futures_stamp_duty_bps: 0.2
+  futures_roll_bps: 4.0           # charged on each monthly roll of a held short
+  # Annualised carry on the short sleeve, accrued daily while held.
+  borrow_bps_annual: 200.0

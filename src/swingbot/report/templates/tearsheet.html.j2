@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>swingbot — {{ market_name }} — {{ generated_at }}</title>
+<style>
+  :root {
+    --ink: #1f2933; --muted: #7b8794; --faint: #9aa5b1;
+    --rule: #e4e7eb; --bg: #ffffff; --panel: #f7f9fa;
+    --pos: #2f7d5d; --neg: #b04a3f; --warn: #8a6d3b; --accent: #3d6a99;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 40px 28px 72px; }
+  header { border-bottom: 2px solid var(--ink); padding-bottom: 14px; margin-bottom: 26px; }
+  h1 { font-size: 25px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.08em;
+       color: var(--muted); margin: 34px 0 12px; font-weight: 600; }
+  section { margin-bottom: 6px; }
+
+  .verdicts { background: var(--panel); border-left: 3px solid var(--accent);
+              padding: 14px 18px; margin: 0 0 22px; border-radius: 0 4px 4px 0; }
+  .verdicts p { margin: 0 0 8px; font-size: 14px; }
+  .verdicts p:last-child { margin-bottom: 0; }
+  .verdicts .leak { color: var(--neg); font-weight: 600; }
+
+  .caveats { background: #fdf6e7; border-left: 3px solid var(--warn);
+             padding: 12px 18px; margin: 0 0 22px; border-radius: 0 4px 4px 0;
+             font-size: 13px; color: #6b5623; }
+  .caveats ul { margin: 6px 0 0; padding-left: 18px; }
+
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+          gap: 1px; background: var(--rule); border: 1px solid var(--rule); margin-bottom: 8px; }
+  .kpi { background: var(--bg); padding: 12px 14px; }
+  .kpi .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--faint); }
+  .kpi .value { font-size: 21px; font-weight: 600; margin-top: 3px;
+                font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .kpi .note { font-size: 11px; color: var(--muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .pos { color: var(--pos); } .neg { color: var(--neg); }
+
+  .chart { margin: 10px 0 4px; }
+  .chart svg { max-width: 100%; height: auto; display: block; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px;
+          font-variant-numeric: tabular-nums; }
+  th { text-align: right; padding: 7px 9px; border-bottom: 1.5px solid var(--ink);
+       font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+  th:first-child, td:first-child { text-align: left; }
+  td { text-align: right; padding: 6px 9px; border-bottom: 1px solid var(--rule); }
+  tbody tr:hover { background: var(--panel); }
+  tr.highlight td { background: #eef4fa; font-weight: 600; }
+  tr.nullmodel td { color: var(--muted); font-style: italic; }
+
+  .note { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; }
+  footer { margin-top: 44px; padding-top: 14px; border-top: 1px solid var(--rule);
+           font-size: 11.5px; color: var(--faint); }
+  code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--panel); padding: 1px 4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>{{ market_name }} — weekly swing strategy</h1>
+  <div class="sub">
+    {{ period_start }} to {{ period_end }} · {{ n_weeks }} weeks ·
+    {{ hold_sessions }}-session hold · generated {{ generated_at }}
+    {% if run_id %} · run <code>{{ run_id }}</code>{% endif %}
+  </div>
+</header>
+
+{% if verdicts %}
+<section class="verdicts">
+  {% for v in verdicts %}
+  <p{% if 'LEAK WARNING' in v %} class="leak"{% endif %}>{{ v }}</p>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if caveats %}
+<section class="caveats">
+  <strong>Qualifications on every number below</strong>
+  <ul>{% for c in caveats %}<li>{{ c }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+<section>
+  <div class="kpis">
+    <div class="kpi"><div class="label">Sharpe</div>
+      <div class="value {{ 'pos' if m.sharpe > 0 else 'neg' }}">{{ '%.2f'|format(m.sharpe) }}</div>
+      <div class="note">95% CI [{{ '%.2f'|format(m.sharpe_ci_low) }}, {{ '%.2f'|format(m.sharpe_ci_high) }}]</div></div>
+    <div class="kpi"><div class="label">Ann. return</div>
+      <div class="value {{ 'pos' if m.ann_return > 0 else 'neg' }}">{{ '%.1f%%'|format(m.ann_return * 100) }}</div>
+      <div class="note">vol {{ '%.1f%%'|format(m.ann_vol * 100) }}</div></div>
+    <div class="kpi"><div class="label">Max drawdown</div>
+      <div class="value neg">{{ '%.1f%%'|format(m.max_drawdown * 100) }}</div>
+      <div class="note">{{ m.max_drawdown_weeks }} weeks under</div></div>
+    <div class="kpi"><div class="label">Calmar</div>
+      <div class="value">{{ '%.2f'|format(m.calmar) }}</div>
+      <div class="note">Sortino {{ '%.2f'|format(m.sortino) }}</div></div>
+    <div class="kpi"><div class="label">Hit rate</div>
+      <div class="value">{{ '%.0f%%'|format(m.hit_rate * 100) }}</div>
+      <div class="note">win/loss {{ '%.2f'|format(m.win_loss_ratio) }}</div></div>
+    <div class="kpi"><div class="label">Turnover</div>
+      <div class="value">{{ '%.0f%%'|format(m.turnover * 100) }}</div>
+      <div class="note">{{ '%.1f'|format(m.cost_drag_bps) }} bps/wk cost</div></div>
+  </div>
+  <p class="note">
+    Weekly data annualises with 52. The Sharpe interval is a block bootstrap, which is
+    wide on purpose: {{ n_weeks }} weeks is a small sample and a point estimate alone
+    would overstate what is known.
+  </p>
+</section>
+
+<h2>Equity</h2>
+<section><div class="chart">{{ equity_svg }}</div></section>
+<section><div class="chart">{{ drawdown_svg }}</div></section>
+<section><div class="chart">{{ rolling_sharpe_svg }}</div></section>
+
+{% if ablation_rows %}
+<h2>Compared to what</h2>
+<section>
+  <div class="scroll">
+  <table>
+    <thead><tr>
+      <th>Variant</th><th>Sharpe</th><th>95% CI</th><th>Ann. ret</th>
+      <th>Max DD</th><th>Hit</th><th>Turnover</th><th>Cost bps</th><th>IC</th><th>IC t</th>
+    </tr></thead>
+    <tbody>
+    {% for r in ablation_rows %}
+      <tr class="{% if r.variant == primary_variant %}highlight{% elif r.variant in ('zero','random','shuffled') %}nullmodel{% endif %}">
+        <td>{{ r.variant }}</td>
+        <td>{{ '%.2f'|format(r.sharpe) }}</td>
+        <td>{{ r.sharpe_ci }}</td>
+        <td>{{ '%.1f%%'|format(r.ann_return * 100) }}</td>
+        <td>{{ '%.1f%%'|format(r.max_dd * 100) }}</td>
+        <td>{{ '%.0f%%'|format(r.hit_rate * 100) }}</td>
+        <td>{{ '%.0f%%'|format(r.turnover * 100) }}</td>
+        <td>{{ '%.1f'|format(r.cost_bps) }}</td>
+        <td>{{ '%.4f'|format(r.ic) }}</td>
+        <td>{{ '%.1f'|format(r.ic_t) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="note">
+    <code>shuffled</code> trains the real model on labels permuted within each week, so it
+    must show an information coefficient near zero. A positive one means the pipeline is
+    leaking and nothing else on this page is valid. <code>random</code> shows how much
+    Sharpe comes free from rebalancing and volatility targeting alone.
+  </p>
+</section>
+{% endif %}
+
+{% if news_effect %}
+<h2>Does the news block earn its weight?</h2>
+<section>
+  <p>
+    Sharpe difference, price+news minus price-only:
+    <strong class="{{ 'pos' if news_effect.difference > 0 else 'neg' }}">
+      {{ '%+.3f'|format(news_effect.difference) }}</strong>
+    (95% CI [{{ '%.3f'|format(news_effect.ci_low) }}, {{ '%.3f'|format(news_effect.ci_high) }}],
+    p = {{ '%.3f'|format(news_effect.p_value) }})
+  </p>
+  <p class="note">
+    This is the paired difference, not two separately computed Sharpe ratios. Both series
+    trade the same universe in the same weeks, so they share most of their variance and
+    the difference is estimated far more precisely than either level.
+    {% if block_contribution %}
+    Configured blend {{ '%.0f%%'|format(block_contribution.configured_price_weight * 100) }} price
+    / {{ '%.0f%%'|format(block_contribution.configured_news_weight * 100) }} news; realised
+    dispersion share {{ '%.0f%%'|format(block_contribution.price * 100) }} / {{ '%.0f%%'|format(block_contribution.news * 100) }},
+    with news present on {{ '%.0f%%'|format(block_contribution.news_coverage * 100) }} of name-weeks.
+    {% endif %}
+  </p>
+</section>
+{% endif %}
+
+<h2>Signal quality</h2>
+<section>
+  <div class="grid2">
+    <div><div class="chart">{{ decile_svg }}</div></div>
+    <div><div class="chart">{{ ic_svg }}</div></div>
+  </div>
+  <p class="note">
+    Weekly IC {{ '%.4f'|format(ic.mean_ic) }} (t = {{ '%.1f'|format(ic.t_stat) }} clustered
+    by week, IC-IR {{ '%.2f'|format(ic.ic_ir) }}, decile monotonicity
+    {{ '%.2f'|format(ic.monotonicity) }}) — {{ ic.verdict }}.
+    The t-statistic uses weeks, not name-weeks: several hundred correlated names in one
+    week are nothing like that many independent observations.
+  </p>
+</section>
+
+{% if deflated %}
+<h2>Multiple testing</h2>
+<section>
+  <div class="kpis">
+    <div class="kpi"><div class="label">Observed Sharpe</div>
+      <div class="value">{{ '%.2f'|format(deflated.observed_sharpe) }}</div></div>
+    <div class="kpi"><div class="label">Expected max, {{ deflated.n_trials }} trials</div>
+      <div class="value">{{ '%.2f'|format(deflated.expected_max_sharpe) }}</div></div>
+    <div class="kpi"><div class="label">P(true Sharpe &gt; 0)</div>
+      <div class="value {{ 'pos' if deflated.probability >= 0.95 else 'neg' }}">{{ '%.2f'|format(deflated.probability) }}</div></div>
+  </div>
+  <p class="note">{{ deflated.verdict }} — the trial count comes from the ledger of every
+  backtest ever run against this market, so configurations that did not work cannot be
+  quietly forgotten.</p>
+</section>
+{% endif %}
+
+{% if cost_rows %}
+<h2>Cost sensitivity</h2>
+<section>
+  <div class="grid2">
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Cost scale</th><th>Sharpe</th><th>Ann. ret</th><th>Max DD</th><th>bps/wk</th></tr></thead>
+        <tbody>
+        {% for r in cost_rows %}
+          <tr{% if r.cost_scale == 1.0 %} class="highlight"{% endif %}>
+            <td>{{ '%.1f'|format(r.cost_scale) }}x</td>
+            <td>{{ '%.2f'|format(r.sharpe) }}</td>
+            <td>{{ '%.1f%%'|format(r.ann_return * 100) }}</td>
+            <td>{{ '%.1f%%'|format(r.max_dd * 100) }}</td>
+            <td>{{ '%.1f'|format(r.cost_bps_per_week) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <p class="note">A strategy that dies between 1x and 2x is not robust: real costs are
+      uncertain by at least that much.</p>
+    </div>
+    <div><div class="chart">{{ cost_svg }}</div></div>
+  </div>
+</section>
+{% endif %}
+
+{% if positions %}
+<h2>Current target book — enter at the open on {{ entry_session }}</h2>
+<section>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Ticker</th><th>Side</th><th>Weight</th><th>Score</th><th>Sector</th><th>Instrument</th></tr></thead>
+    <tbody>
+    {% for p in positions %}
+      <tr>
+        <td>{{ p.ticker }}</td>
+        <td class="{{ 'pos' if p.weight > 0 else 'neg' }}">{{ 'LONG' if p.weight > 0 else 'SHORT' }}</td>
+        <td class="{{ 'pos' if p.weight > 0 else 'neg' }}">{{ '%+.2f%%'|format(p.weight * 100) }}</td>
+        <td>{{ '%+.3f'|format(p.score) }}</td>
+        <td>{{ p.sector }}</td>
+        <td>{{ p.instrument }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="note">
+    Gross {{ '%.0f%%'|format(gross * 100) }}, net {{ '%+.0f%%'|format(net * 100) }}.
+    {% if short_instrument == 'futures' %}
+    Shorts are priced as single-stock futures, because NSE cash-segment delivery cannot be
+    held short overnight. Costs include roll and carry.
+    {% endif %}
+  </p>
+</section>
+{% endif %}
+
+{% if top_features %}
+<h2>What the model is using</h2>
+<section>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Feature</th><th>Importance</th></tr></thead>
+    <tbody>
+    {% for f in top_features %}
+      <tr><td>{{ f.name }}</td><td>{{ '%.3f'|format(f.importance) }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+
+<footer>
+  Generated by swingbot {{ version }} · config <code>{{ config_hash }}</code>
+  {% if git_revision %}· git <code>{{ git_revision }}</code>{% endif %}<br>
+  Research output, not investment advice. Backtested results are not a forecast.
+  Trade this on paper for a long time before it touches money.
+</footer>
+
+</div>
+</body>
+</html>

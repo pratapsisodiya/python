@@ -1,0 +1,18 @@
+# Live profile: incremental window, notifications on, strict staleness checks.
+run:
+  log_level: INFO
+
+data:
+  providers: [csv, yahoo, stooq, synthetic]
+
+execution:
+  adapter: csv
+
+notify:
+  telegram:
+    enabled: true
+  email:
+    enabled: true
+
+nlp:
+  backend: lexicon

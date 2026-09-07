@@ -1,0 +1,18 @@
+# Research profile: full history, wide universe, no live side effects.
+run:
+  log_level: INFO
+
+data:
+  start: "2015-01-01"
+
+universe:
+  max_names: 500
+
+execution:
+  adapter: csv
+
+notify:
+  telegram:
+    enabled: false
+  email:
+    enabled: false

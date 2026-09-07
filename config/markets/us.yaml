@@ -1,0 +1,42 @@
+# US equities profile.
+market_profile:
+  name: us
+  display_name: "US Equities"
+  currency: USD
+  timezone: America/New_York
+  close_local_time: "16:00"
+  symbol_suffix: ""
+  benchmark: SPY
+  # Cash equity can be held short overnight, subject to borrow.
+  allow_short: true
+  short_instrument: cash_equity
+
+universe:
+  file: config/universe/sp500.csv
+
+news:
+  rss:
+    hl: en-US
+    gl: US
+    ceid: "US:en"
+
+costs:
+  # Everything in basis points of traded notional unless stated otherwise.
+  commission_bps: 0.5
+  min_commission: 0.0
+  # Regulatory fees apply to sells only in the US.
+  regulatory_sell_bps: 0.3
+  # Half-spread floor; the model takes the max of this and a high-low estimate.
+  min_half_spread_bps: 2.0
+  spread_from_range_factor: 0.010   # half-spread as a fraction of the daily range
+  # Square-root market impact: impact_bps = k * daily_vol_bps * sqrt(participation)
+  impact_k: 0.5
+  # Annualised borrow cost on the short sleeve, accrued daily while held.
+  borrow_bps_annual: 50.0
+  # Futures-specific costs are unused for the US cash-equity profile.
+  futures_roll_bps: 0.0
+  stt_buy_bps: 0.0
+  stt_sell_bps: 0.0
+  stamp_duty_bps: 0.0
+  exchange_bps: 0.0
+  gst_rate: 0.0

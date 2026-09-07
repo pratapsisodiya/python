@@ -1,0 +1,148 @@
+# swingbot base configuration.
+# Layering order: base.yaml -> markets/<market>.yaml -> profiles/<profile>.yaml
+#                 -> environment (SWINGBOT__SECTION__KEY) -> --set section.key=value
+#
+# Secrets never live here. They come from the environment only.
+
+run:
+  data_dir: data
+  runs_dir: runs
+  seed: 7
+  log_level: INFO
+
+market: us              # overridden by --market; selects config/markets/<market>.yaml
+
+data:
+  # Providers are tried in order. The first that returns bars for a symbol wins.
+  # 'csv' and 'synthetic' always work offline; 'yahoo' and 'stooq' need network.
+  providers: [csv, synthetic]
+  cache_enabled: true
+  start: "2015-01-01"
+  end: null                       # null means "up to today"
+  min_history_sessions: 260       # a name needs this much history to be scored
+  min_price: 5.0                  # in market currency, penny-stock filter
+  min_adv_notional: 1.0e7         # 20-day average daily traded value floor
+
+universe:
+  file: null                      # set per market; point-in-time membership CSV
+  max_names: 500
+  # Applied when the membership file has no end_date column at all.
+  assume_survivorship_biased: true
+
+calendar:
+  # The weekly decision grid. Signals are computed at the close of decision_weekday,
+  # and filled at the open of the NEXT session. Never the same bar.
+  decision_weekday: 4             # 0=Mon .. 4=Fri
+  hold_sessions: 5                # weekly hold; 10 = two weeks, etc.
+
+features:
+  winsorize_quantile: 0.02
+  min_names_per_week: 20
+  sector_neutralize: false
+  news:
+    enabled: true
+    lookback_days: 10
+    half_life_hours: 36
+    peer_weight: 0.3
+    speculative_discount: 0.5
+
+labels:
+  # Cross-sectional excess log return over the hold window, measured
+  # open-to-open on the sessions the backtest actually trades.
+  kind: excess_log_return
+  vol_scale: false
+
+cv:
+  scheme: purged_walk_forward
+  train_weeks: 156                # 3 years
+  test_weeks: 26                  # 6 months
+  embargo_weeks: 2
+  expanding: true
+  min_train_weeks: 104
+
+model:
+  price_model: gbdt               # gbdt | ridge
+  news_model: ridge
+  # The 90/10 blend the user asked for: most of the forecast comes from price
+  # history and chart structure, a minority from news.
+  blend:
+    price_weight: 0.90
+    news_weight: 0.10
+  gbdt:
+    n_estimators: 300
+    learning_rate: 0.03
+    num_leaves: 15
+    min_child_samples: 80
+    subsample: 0.8
+    colsample_bytree: 0.7
+    reg_lambda: 5.0
+  ridge:
+    alpha: 10.0
+  recency_half_life_weeks: 104
+
+portfolio:
+  n_long: 8
+  n_short: 7
+  gross_leverage: 1.0
+  max_net_exposure: 0.30          # |long - short| as a fraction of equity
+  target_vol_annual: 0.12
+  sizing: inverse_vol             # inverse_vol | equal | kelly
+  kelly_fraction: 0.25
+  max_weight: 0.12
+  max_sector_weight: 0.35
+  no_trade_band: 0.005            # skip a rebalance smaller than this weight change
+  min_position_notional: 0.0
+  max_participation_adv: 0.05     # cap order at this fraction of 20d ADV
+
+risk:
+  drawdown_scale_at: 0.08         # halve gross here
+  drawdown_flat_at: 0.15          # go flat here
+  cooldown_weeks: 4
+  enabled: true
+
+backtest:
+  initial_equity: 1000000.0
+  cost_scale: 1.0
+  start: null
+  end: null
+
+execution:
+  adapter: csv                    # csv | paper
+  output_dir: runs
+
+notify:
+  telegram:
+    enabled: false
+  email:
+    enabled: false
+    smtp_host: null
+    smtp_port: 587
+    use_tls: true
+    sender: null
+    recipients: []
+
+nlp:
+  # Provider-agnostic on purpose. 'lexicon' needs no key and works offline.
+  backend: lexicon                # lexicon | openai_compat | anthropic | finbert
+  batch_size: 20
+  max_articles_per_run: 2000
+  max_spend_usd: 5.0
+  timeout_seconds: 60
+  max_retries: 3
+  prompt_version: v1
+  openai_compat:
+    base_url: https://api.openai.com/v1
+    model: gpt-4o-mini
+    api_key_env: OPENAI_API_KEY
+  anthropic:
+    model: claude-opus-5        # any Claude model; sonnet or haiku are cheaper for bulk backfill
+    api_key_env: ANTHROPIC_API_KEY
+  finbert:
+    model: ProsusAI/finbert
+
+news:
+  provider: jsonl                 # jsonl | rss
+  jsonl_path: null
+  rss:
+    max_items_per_symbol: 50
+    request_delay_seconds: 0.5
