@@ -39,6 +39,21 @@ function money(value, currency) {
 
 const shortStamp = (iso) => (iso ? String(iso).slice(0, 16).replace("T", " ") : NBSP_DASH);
 
+/**
+ * Format a number for a table whose columns we do not know in advance.
+ *
+ * Precision scaled to magnitude, trailing zeros trimmed. A fixed four decimals put "504
+ * weeks" on the ablation table as `504.0000` and a hit rate of 72% as `0.7210`, which
+ * makes a panel meant to be read carefully harder to read than it needs to be.
+ */
+function autoNum(value) {
+  if (!Number.isFinite(value)) return NBSP_DASH;
+  if (Number.isInteger(value)) return value.toLocaleString();
+  const abs = Math.abs(value);
+  const digits = abs >= 100 ? 1 : abs >= 1 ? 2 : 4;
+  return Number(value.toFixed(digits)).toString();
+}
+
 let toastTimer = null;
 function toast(message) {
   const node = $("toast");
@@ -98,7 +113,7 @@ function renderRowsTable(container, rows, { limit = 200 } = {}) {
     for (const column of columns) {
       const value = row[column];
       const isNumber = typeof value === "number";
-      tr.append(cell("td", isNumber ? num(value, 4) : (value ?? NBSP_DASH), isNumber ? "num" : ""));
+      tr.append(cell("td", isNumber ? autoNum(value) : (value ?? NBSP_DASH), isNumber ? "num" : ""));
     }
     tbody.append(tr);
   }
