@@ -13,6 +13,7 @@ curve that never happened.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Sequence
 from datetime import date
@@ -21,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 from ..config import Config
-from ..io.store import ParquetStore
+from ..io.store import ParquetStore, write_json
 from ..types import (
     AVAILABLE_AT,
     BAR_COLUMNS,
@@ -64,6 +65,8 @@ class ProviderChain:
         self.providers = list(providers)
         self.store = store
         self.cache_enabled = cache_enabled and store is not None
+        #: ticker -> provider name, populated by :meth:`daily_bars`.
+        self.attribution: dict[str, str] = {}
 
     # ---------------------------------------------------------------- construction
 
@@ -105,6 +108,25 @@ class ProviderChain:
     def available(self) -> bool:
         return any(getattr(p, "available", lambda: True)() for p in self.providers)
 
+    #: Provider names whose output is generated rather than observed.
+    FABRICATED_SOURCES = frozenset({"synthetic", "synthetic-csv"})
+
+    def fabricated_tickers(self) -> list[str]:
+        """Tickers whose bars came from a generator rather than a market.
+
+        The one question worth asking about a chain's output, and it has two answers
+        because there are two ways to get invented prices. A live chain ending in
+        ``synthetic`` will answer for any ticker a real source could not supply — that is
+        how three renamed NSE symbols joined 126 genuine ones. And ``swingbot demo``
+        writes its generated CSVs into the same directory a user's own exports go, where
+        they shadow everything, which is how a whole real fetch got quietly ignored.
+
+        Both come back here, so a single caveat covers both.
+        """
+        return sorted(
+            t for t, p in self.attribution.items() if p in self.FABRICATED_SOURCES
+        )
+
     # ---------------------------------------------------------------------- public
 
     def daily_bars(
@@ -118,13 +140,24 @@ class ProviderChain:
     ) -> pd.DataFrame:
         tickers = list(dict.fromkeys(tickers))
         collected: dict[str, pd.DataFrame] = {}
+        # Which provider supplied each ticker. Recorded because the chain's whole job is
+        # to fall through until something answers, and the last thing in a live chain is
+        # usually a generator. Without attribution a run that quietly invented prices for
+        # a handful of names looks exactly like one that did not.
+        self.attribution = {}
 
         if use_cache and self.cache_enabled and not refresh:
             cached = self._read_cache()
             if not cached.empty:
+                # The sidecar remembers which provider originally answered, so a cache
+                # hit does not launder generated prices into apparently real ones.
+                remembered = self._read_attribution()
                 for ticker, group in cached.groupby(TICKER, sort=False):
                     if ticker in tickers and _covers(group, start, end):
                         collected[str(ticker)] = group
+                        self.attribution[str(ticker)] = remembered.get(
+                            str(ticker), "cache"
+                        )
 
         missing = [t for t in tickers if t not in collected]
 
@@ -144,10 +177,12 @@ class ProviderChain:
             if frame is None or frame.empty:
                 continue
             frame = _normalise(frame)
+            provider_name = str(getattr(provider, "name", provider))
             for ticker, group in frame.groupby(TICKER, sort=False):
                 if str(ticker) in collected:
                     continue
                 collected[str(ticker)] = group
+                self.attribution[str(ticker)] = provider_name
             got = {str(t) for t in frame[TICKER].unique()}
             missing = [t for t in missing if t not in got]
             log.info(
@@ -155,6 +190,12 @@ class ProviderChain:
                 getattr(provider, "name", provider),
                 len(got),
                 len(missing),
+            )
+
+        if missing:
+            log.warning(
+                "no provider supplied %d ticker(s): %s",
+                len(missing), ", ".join(missing[:8]) + ("..." if len(missing) > 8 else ""),
             )
 
         if not collected:
@@ -173,16 +214,62 @@ class ProviderChain:
     def _cache_parts(self) -> tuple[str, ...]:
         return ("raw", "bars.parquet")
 
+    def _attribution_path(self):
+        return self.store.path("raw", "attribution.json") if self.store else None
+
     def _read_cache(self) -> pd.DataFrame:
         if self.store is None:
             return pd.DataFrame()
         frame = self.store.read(*self._cache_parts())
         return _normalise(frame) if not frame.empty else frame
 
+    def _read_attribution(self) -> dict[str, str]:
+        """Where each cached ticker's bars originally came from.
+
+        A sidecar rather than a column on the bars, because provenance is a property of
+        the *series*, not of each row, and adding a column would change the bar schema
+        that :mod:`swingbot.types` pins and the tests assert.
+
+        This exists because losing it was a real defect. Attribution was recorded at fetch
+        time and thrown away on the way into parquet, so a cache holding three invented
+        NSE symbols alongside 126 real ones came back on the next run indistinguishable
+        from a wholly real dataset — and the caveat that should have said so could not
+        fire.
+        """
+        path = self._attribution_path()
+        if path is None or not path.exists():
+            return {}
+        try:
+            return {
+                str(k): str(v)
+                for k, v in json.loads(path.read_text()).get("providers", {}).items()
+            }
+        except (OSError, ValueError, AttributeError):
+            return {}
+
     def _write_cache(self, frame: pd.DataFrame) -> None:
         if self.store is None:
             return
         self.store.append(frame, *self._cache_parts(), dedupe_on=[TICKER, SESSION])
+        self._write_attribution()
+
+    def _write_attribution(self) -> None:
+        """Merge this fetch's provenance into the sidecar.
+
+        Merged rather than replaced: one run may fetch a handful of names while the cache
+        holds hundreds, and forgetting the rest would make a partial refresh look like a
+        clean dataset. ``cache`` is never written — it is not a source, it is where a
+        source's answer was kept.
+        """
+        path = self._attribution_path()
+        if path is None:
+            return
+        merged = self._read_attribution()
+        merged.update(
+            {t: p for t, p in self.attribution.items() if p and p != "cache"}
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, {"providers": merged})
 
 
 # --------------------------------------------------------------------------------------

@@ -27,6 +27,27 @@ market_profile:
   # to a 500 lot doubles the intended exposure.
   derivative_lot_size: 1
 
+data:
+  # NSE-native, and deliberately with no generator at the end of the chain.
+  #
+  # `upstox` is an Indian broker's public candle API: the exchange's own data one hop
+  # away, timestamps already in IST, and it does not answer one request and then
+  # rate-limit the next hundred the way Yahoo does to a shared address. `csv` comes first
+  # so a local cache or your own exports win.
+  #
+  # `synthetic` is absent on purpose. A generator at the end of a live chain answers for
+  # every symbol a real source could not supply, which is how three renamed NSE tickers
+  # entered a supposedly real dataset as invented prices. A name with no real history
+  # should have no data — the liquidity screen then drops it, which is the correct
+  # outcome — rather than have a random walk stand in for it.
+  #
+  # `swingbot demo` still works: it writes CSVs that the `csv` provider serves, and marks
+  # the directory so those prices are reported as generated rather than as market data.
+  providers: [csv, upstox]
+  # Upstox daily history begins around here. Asking for earlier returns an empty list
+  # rather than an error, so the floor is stated instead of discovered.
+  start: 2018-01-01
+
 universe:
   file: config/universe/nifty200.csv
 

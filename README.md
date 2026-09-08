@@ -131,8 +131,24 @@ Two markets are supported out of the box: `us` (US stocks) and `india` (NSE stoc
 one with `--market us` or `--market india` on every command (`in` and `nse` also work for
 India).
 
-You need real daily price history for the stocks you want to trade. The simplest and most
-reliable way, whatever broker or data source you have access to, is a CSV file per stock:
+### India: it fetches real NSE data by itself
+
+Nothing to download. The India profile talks to an Indian broker's public price API, so
+this just works:
+
+```bash
+swingbot instruments --market india    # lot sizes and ISINs from the exchange list
+swingbot fetch --market india          # ~8 years of real NSE daily history
+swingbot backtest --market india --ablation --sensitivity
+```
+
+The first command is worth running before anything else on India. It fetches the F&O
+**lot sizes**, and those decide whether you can short at all — see the warning below.
+
+### Other markets: bring your own CSVs
+
+The simplest and most reliable way, whatever broker or data source you have access to, is a
+CSV file per stock:
 
 1. Export or download daily price history for each stock you're interested in. You need
    at least these columns: **date, open, high, low, close, volume.** Almost any broker,
@@ -156,6 +172,36 @@ looks like it's leaking information from the future, or that the strategy doesn'
 simple momentum, or that costs eat all the profit — believe it. That is the entire point
 of this system: it is built to tell you when an idea doesn't hold up, not to talk you into
 trading it anyway.
+
+### India: how much money you need before you can short
+
+This one surprises people, so it is worth knowing before you start rather than after a
+rejected order.
+
+On NSE you cannot hold a short in the cash segment overnight. A weekly short therefore has
+to be a **single-stock future** — and futures trade in fixed lots set by the exchange, not
+in single shares. Those lots are big, and they vary enormously: RELIANCE is 500 shares a
+lot, IOC is 4,875.
+
+One lot of the *cheapest* F&O name in the Nifty 200 is around **₹3 lakh**. The system caps
+any single position at 12% of your account. Put those together:
+
+| Your account | Shorts you can actually place |
+| --- | --- |
+| ₹5,00,000 | **none at all** |
+| ₹25,00,000 | 1 or 2 |
+| ₹40,00,000 | about 7 — enough for the strategy as configured |
+| ₹1,00,00,000 | essentially the whole list |
+
+Below roughly ₹36 lakh the model will still *tell* you to short things, and not one of
+those orders can be placed. So run it long-only until your account is big enough:
+
+```bash
+swingbot signal --market india --set market_profile.short_instrument=none
+```
+
+`swingbot doctor --market india` prints your own numbers for this, and the weekly signal
+explains any position it had to drop, with the arithmetic.
 
 **About the included stock lists:** `config/universe/sp500.csv` and
 `config/universe/nifty200.csv` are provided so you have something to start with, but they
@@ -523,6 +569,62 @@ difference between explaining a past trade and guessing at it. The command refus
 saved model's features no longer match the current ones, or if the model is older than
 `model.max_model_age_weeks` — reproducing an old decision is fine, but trading this week
 on a year-old fit should have to be asked for out loud.
+
+### What it actually did on real Indian data
+
+Not a demo. 272,615 real NSE daily bars, 128 Nifty 200 names, 452 weeks from January 2018
+to September 2026, fetched by the command in Step 3.
+
+| What you'd do | Sharpe | Return a year |
+| --- | --- | --- |
+| Just hold the whole list, equally | **+0.98** | **+18.3%** |
+| This strategy, long-only | +0.54 | +3.4% |
+| Plain momentum, no machine learning | +0.91 | +5.9% |
+| This strategy, long **and** short | −0.14 | −0.9% |
+| Coin flip at the same turnover | −0.97 | −3.7% |
+
+**Buying the whole list and doing nothing beat everything else.** The system says so
+itself, in the verdicts it prints:
+
+> The model (Sharpe 0.54) does not beat plain momentum and reversal. The added complexity
+> is not earning anything.
+>
+> The strategy (Sharpe 0.54) does not beat simply holding the universe (Sharpe 0.98).
+>
+> Deflated Sharpe: does not survive deflation; likely selection, not skill.
+
+Two things are worth understanding about *why*, because they are not the same as "the idea
+was stupid".
+
+**The signal is genuinely there. Costs eat it.** The model's predictions have an
+information coefficient of +0.026 with a t-statistic of 3.4 over 296 out-of-sample weeks —
+a small but statistically real ability to rank stocks. The leak check passes, so this is
+not the harness fooling itself. The problem is arithmetic:
+
+```
+gross return   +7.4% a year
+trading costs  -8.3% a year   (49% of the book turned over every week)
+net            -0.9% a year
+```
+
+An edge this size cannot pay for weekly turnover at Indian cash-segment charges. At *half*
+the assumed cost it makes +0.29 Sharpe; at double it makes −1.20. A strategy that lives
+entirely inside its cost assumption is not one to trade.
+
+**Shorting a rising market cost the rest.** The Nifty compounded at 18% a year over this
+period. Being short anything into that is a headwind the model has to overcome before it
+earns a rupee. Long-only takes the Sharpe from −0.14 to +0.54 — and it is also the only
+version most accounts can place at all, for the lot-size reason above.
+
+**So: don't trade this.** Not yet. What it is good for right now is the machinery — a
+pipeline that fetches real data, respects point-in-time correctness, models real costs, and
+tells you honestly when an idea does not work. That last part is the hard part, and it is
+working exactly as intended: it just told you not to trade its own strategy.
+
+If you want to make it work, the numbers say where to push: cut turnover hard (the
+`no_trade_band` and `n_long`/`n_short` settings), or find a signal several times stronger.
+Fishing through settings until one shows a positive Sharpe is exactly what the deflated
+Sharpe and the PBO check exist to catch you doing.
 
 ### Expectations, honestly
 

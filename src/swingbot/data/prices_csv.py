@@ -51,14 +51,35 @@ _ALIASES = {
 }
 
 
+#: Written by ``swingbot demo`` beside the CSVs it generates.
+#:
+#: A generated CSV is byte-indistinguishable from a real export, so without a marker the
+#: chain reports "csv supplied 129 tickers" whether the prices came from an exchange or
+#: from a random walk. That is not a hypothetical: leftover demo files silently shadowed a
+#: real NSE fetch here, and every number downstream was measuring the generator.
+GENERATED_MARKER = "GENERATED.json"
+
+
 class CSVProvider:
     """Reads local CSV or parquet files, one per ticker."""
-
-    name = "csv"
 
     def __init__(self, directory: Path | str, *, close_hour_utc: int = 21) -> None:
         self.directory = Path(directory)
         self.close_hour_utc = close_hour_utc
+
+    @property
+    def name(self) -> str:
+        """``csv``, or ``synthetic-csv`` when the directory is marked as generated.
+
+        A property rather than a class attribute so the answer follows the directory. The
+        chain records this name as the provenance of every ticker it supplies, so renaming
+        here is what makes the synthetic-data caveat fire on a poisoned CSV directory.
+        """
+        return "synthetic-csv" if self.is_generated else "csv"
+
+    @property
+    def is_generated(self) -> bool:
+        return (self.directory / GENERATED_MARKER).exists()
 
     def available(self) -> bool:
         return self.directory.exists() and any(self._candidates())

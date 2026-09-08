@@ -12,7 +12,7 @@ INFY,Infosys Ltd,Information Technology,1995-01-01,,400
 HCLTECH,HCL Technologies,Information Technology,2000-01-06,,400
 WIPRO,Wipro Ltd,Information Technology,1995-01-01,,3000
 TECHM,Tech Mahindra,Information Technology,2006-08-28,,600
-LTIM,LTIMindtree Ltd,Information Technology,2016-07-21,,
+LTIM,LTIMindtree Ltd,Information Technology,2016-07-21,2025-12-31,
 PERSISTENT,Persistent Systems,Information Technology,2010-04-06,,125
 COFORGE,Coforge Ltd,Information Technology,2004-08-11,,475
 MPHASIS,Mphasis Ltd,Information Technology,2000-08-16,,275
@@ -54,7 +54,7 @@ VBL,Varun Beverages,Consumer Staples,2016-11-08,,1275
 PGHH,Procter & Gamble Hygiene,Consumer Staples,1995-01-01,,
 MARUTI,Maruti Suzuki India,Consumer Discretionary,2003-07-09,,50
 M&M,Mahindra & Mahindra,Consumer Discretionary,1995-01-01,,200
-TATAMOTORS,Tata Motors,Consumer Discretionary,1995-01-01,,
+TMPV,Tata Motors,Consumer Discretionary,1995-01-01,,1600
 BAJAJ-AUTO,Bajaj Auto,Consumer Discretionary,2008-05-26,,75
 EICHERMOT,Eicher Motors,Consumer Discretionary,1995-01-01,,100
 HEROMOTOCO,Hero MotoCorp,Consumer Discretionary,1995-01-01,,150
@@ -68,7 +68,7 @@ VOLTAS,Voltas Ltd,Consumer Discretionary,1995-01-01,,375
 PAGEIND,Page Industries,Consumer Discretionary,2007-03-12,,20
 JUBLFOOD,Jubilant FoodWorks,Consumer Discretionary,2010-02-08,,1250
 INDHOTEL,Indian Hotels Company,Consumer Discretionary,1995-01-01,,1000
-ZOMATO,Zomato Ltd,Consumer Discretionary,2021-07-23,,
+ETERNAL,Zomato Ltd,Consumer Discretionary,2021-07-23,,2425
 BOSCHLTD,Bosch Ltd,Consumer Discretionary,1995-01-01,,25
 MOTHERSON,Samvardhana Motherson,Consumer Discretionary,1995-01-01,,6150
 BALKRISIND,Balkrishna Industries,Consumer Discretionary,1995-01-01,,

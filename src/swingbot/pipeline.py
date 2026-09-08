@@ -25,6 +25,7 @@ from .data import (
     membership_panel,
     screen_bars,
 )
+from .data.prices_csv import GENERATED_MARKER
 from .features import (
     FeaturePipeline,
     build_labels,
@@ -34,7 +35,7 @@ from .features import (
     recency_weights,
     uniqueness_weights,
 )
-from .io.store import ParquetStore
+from .io.store import ParquetStore, write_json
 from .types import DECISION_SESSION, SESSION, TICKER
 
 log = logging.getLogger(__name__)
@@ -60,7 +61,14 @@ class MarketData:
 
 
 def load_bars(cfg: Config, *, refresh: bool = False) -> tuple[pd.DataFrame, object]:
-    """Fetch or read cached bars for the configured universe."""
+    """Fetch or read cached bars for the configured universe.
+
+    Attaches ``bars.attrs["provider_attribution"]`` and
+    ``bars.attrs["fabricated_tickers"]`` so a caller can tell real prices from generated
+    ones. Worth carrying because a live provider chain ends in the synthetic generator,
+    which answers for anything nothing else could supply — and a run that invented prices
+    for a few names is otherwise indistinguishable from one that did not.
+    """
     universe = load_universe(cfg)
     tickers = universe.all_tickers()
 
@@ -77,7 +85,11 @@ def load_bars(cfg: Config, *, refresh: bool = False) -> tuple[pd.DataFrame, obje
             "Check config/markets/<market>.yaml providers, or drop CSVs into "
             f"{cfg.market_dir / 'csv'}, or run `swingbot demo` for synthetic data."
         )
-    return screen_bars(bars), universe
+
+    screened = screen_bars(bars)
+    screened.attrs["provider_attribution"] = dict(chain.attribution)
+    screened.attrs["fabricated_tickers"] = chain.fabricated_tickers()
+    return screened, universe
 
 
 def build_market_data(
@@ -104,6 +116,40 @@ def build_market_data(
     warning = getattr(universe, "bias_warning", lambda: None)()
     if warning:
         caveats.append(warning)
+
+    # Generated prices sitting inside a real dataset.
+    #
+    # A live chain ends in the synthetic generator so that `swingbot demo` works with no
+    # data source, and the consequence is that any ticker a real provider cannot supply
+    # gets invented instead. On NSE that was LTIM, TATAMOTORS and ZOMATO — symbols that
+    # changed or demerged — quietly joining 126 genuine names. The fetch logged success.
+    # Nothing a report showed said the difference, which is precisely the kind of silence
+    # this codebase treats as a defect.
+    fabricated = list(bars.attrs.get("fabricated_tickers") or [])
+    if fabricated:
+        n_total = bars[TICKER].nunique()
+        if len(fabricated) == n_total:
+            # A demo dataset. Every price is generated, and the generator planted a signal
+            # on purpose — so a good-looking Sharpe here is a measurement of the generator
+            # and nothing else. That is worth saying in the report rather than only in the
+            # README, because the number is what people remember.
+            caveats.append(
+                f"DEMO DATA: all {n_total} names carry generated prices, not market data. "
+                "The generator plants a known signal so the harness can be checked against "
+                "an answer it was given, which means every performance figure here is a "
+                "measurement of the generator. Nothing on this run says anything about a "
+                "real market. Fetch real prices before drawing any conclusion."
+            )
+        else:
+            shown = ", ".join(fabricated[:6]) + ("..." if len(fabricated) > 6 else "")
+            caveats.append(
+                f"{len(fabricated)} of {n_total} names carry SYNTHETIC prices from the "
+                f"generator, not market data ({shown}) — no real provider could supply "
+                "them, usually a renamed or delisted symbol. Every number involving these "
+                "names is fiction, and they are mixed in with real ones. Fix the symbols in "
+                "the universe file, or remove `synthetic` from data.providers so such a "
+                "name simply has no data instead of an invented history."
+            )
 
     data = MarketData(
         cfg=cfg, bars=bars, calendar=calendar, grid=grid, universe=universe, caveats=caveats
@@ -277,8 +323,36 @@ def generate_demo_data(cfg: Config, *, years: int = 8, n_names: int = 0) -> Path
 
     directory = cfg.market_dir / "csv"
     write_csv_fixture(bars, directory)
+
+    # Mark the directory as generated.
+    #
+    # The demo writes into the same place a user drops their own exports, and a synthetic
+    # CSV is byte-indistinguishable from a real one. Without a marker the provider chain
+    # reports "csv supplied 129 tickers" and every downstream report treats invented
+    # prices as market data — which is exactly what happened here: a real NSE fetch was
+    # silently shadowed by leftover demo files, and the Sharpe on screen was measuring the
+    # generator.
+    #
+    # `CSVProvider` reads this file and renames itself, so attribution and the caveat both
+    # tell the truth without the user having to remember which directory holds what.
+    write_json(
+        directory / GENERATED_MARKER,
+        {
+            "generated_by": "swingbot demo",
+            "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "market": cfg.market_profile.name,
+            "seed": cfg.run.seed,
+            "n_tickers": len(tickers),
+            "note": (
+                "These prices are SYNTHETIC. They were generated with a planted signal so "
+                "the harness can be checked against a known answer. Delete this directory "
+                "before using real data — or delete this marker only if you have replaced "
+                "the CSVs with genuine market data."
+            ),
+        },
+    )
     log.info(
-        "wrote %d synthetic bar(s) for %d ticker(s) to %s",
+        "wrote %d synthetic bar(s) for %d ticker(s) to %s (marked as generated)",
         len(bars), len(tickers), directory,
     )
     return directory
