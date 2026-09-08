@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>swingbot order helper — settings</title>
+  <link rel="stylesheet" href="popup.css" />
+  <style>
+    body { width: 380px; padding: 14px; }
+    label { display: block; margin-bottom: 12px; }
+    label > span { display: block; font-weight: 600; margin-bottom: 4px; }
+    input[type="url"] {
+      width: 100%;
+      font: inherit;
+      color: var(--fg);
+      background: var(--bg-sunken);
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 6px 8px;
+    }
+    .field-hint { color: var(--fg-dim); font-size: 11.5px; margin-top: 4px; font-weight: 400; }
+    .row { display: flex; align-items: center; gap: 10px; }
+  </style>
+</head>
+<body>
+  <h2 style="margin: 0 0 12px; font-size: 15px;">Settings</h2>
+
+  <label>
+    <span>Dashboard address</span>
+    <input id="baseUrl" type="url" placeholder="http://127.0.0.1:8765" />
+    <span class="field-hint">
+      Where <code>swingbot serve</code> is listening. Must be a loopback address
+      (<code>127.0.0.1</code> or <code>localhost</code>) — the extension asks for no
+      permission to reach anywhere else.
+    </span>
+  </label>
+
+  <label>
+    <span>Market</span>
+    <select id="market">
+      <option value="us">US</option>
+      <option value="india">India (NSE)</option>
+    </select>
+    <span class="field-hint">Which market's weekly orders the popup shows.</span>
+  </label>
+
+  <div class="row">
+    <button id="save" class="primary">Save</button>
+    <button id="test" class="copy-btn">Test connection</button>
+    <span id="result" class="field-hint"></span>
+  </div>
+
+  <script src="client.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

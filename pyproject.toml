@@ -33,11 +33,17 @@ yahoo = ["yfinance>=0.2.40"]
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.40"]
 finbert = ["transformers>=4.40", "torch>=2.2"]
+# The local dashboard. Optional so a CLI-only install pulls in no web stack; `swingbot.web`
+# imports fastapi lazily, and tests/test_architecture.py asserts the package still imports
+# cleanly without it.
+web = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.5", "mypy>=1.10"]
 all = [
     "lightgbm>=4.0",
     "duckdb>=0.10",
     "yfinance>=0.2.40",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
 ]
 
 [project.scripts]
@@ -45,6 +51,9 @@ swingbot = "swingbot.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/swingbot"]
+# The dashboard's Jinja2 template and its CSS/JS are loaded from the installed package at
+# runtime, so they have to be in the wheel rather than only in the source tree.
+artifacts = ["src/swingbot/web/templates/*", "src/swingbot/web/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

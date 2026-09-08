@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>swingbot — {{ display_name }}</title>
+  <link rel="stylesheet" href="/static/app.css" />
+  <!-- Inline so the page makes no extra request and cannot 404 on a favicon. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23181e28'/%3E%3Cpath d='M6 23h7v-7h7V9h6' fill='none' stroke='%235ed68f' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E" />
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-left">
+    <span class="logo">swingbot</span>
+    <select id="market" aria-label="Market">
+      {% for m in markets %}<option value="{{ m }}"{% if m == market %} selected{% endif %}>{{ m }}</option>{% endfor %}
+    </select>
+    <span id="health-line" class="muted small"></span>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-panel="week" role="tab">This week</button>
+    <button class="tab" data-panel="run" role="tab">Run it</button>
+    <button class="tab" data-panel="checks" role="tab">Honesty checks</button>
+    <button class="tab" data-panel="history" role="tab">Run history</button>
+    <button class="tab" data-panel="health" role="tab">Health</button>
+  </nav>
+</header>
+
+<div class="banner readonly">
+  This dashboard never connects to a broker and holds no credentials. It works out what to
+  trade; you place the trades yourself.
+</div>
+
+<main>
+
+<!-- ------------------------------------------------------------------ this week -->
+<section id="panel-week" class="panel active">
+  <div id="week-empty" class="empty" hidden>
+    <p>No weekly signal for this market yet.</p>
+    <p class="muted">
+      Go to <b>Run it</b> and press <b>This week's signal</b>. On a fresh install, run
+      <b>Synthetic demo data</b> first so there is something to work with.
+    </p>
+  </div>
+
+  <div id="week-content" hidden>
+    <div class="kpis" id="week-kpis"></div>
+
+    <div id="week-futures" class="banner warn" hidden>
+      <strong>Short positions here are futures, not equity.</strong>
+      Rows marked <code>futures</code> go on the <b>F&amp;O segment</b>, not equity delivery —
+      NSE delivery cannot be held short overnight. Placing one as an ordinary sell either
+      gets rejected or sells stock you do not own.
+    </div>
+
+    <div id="week-notes" class="notes" hidden></div>
+
+    <h2>Orders to place <span class="muted small" id="week-placed-count"></span></h2>
+    <p class="muted small">
+      Tick a row once you have placed it. The tick is saved into the run folder, and the
+      browser extension shows the same list.
+    </p>
+    <div class="scroll"><table id="orders-table"><thead><tr>
+      <th class="col-tick"></th><th>Ticker</th><th>Side</th><th class="num">Quantity</th>
+      <th>Instrument</th><th class="num">Est. price</th><th class="num">Est. value</th>
+    </tr></thead><tbody id="orders-body"></tbody></table></div>
+
+    <h2>Target book</h2>
+    <p class="muted small">
+      What the portfolio should hold after these orders fill. Weight is a fraction of
+      account equity; score is the model's cross-sectional ranking.
+    </p>
+    <div class="scroll"><table id="book-table"><thead><tr>
+      <th>Ticker</th><th class="num">Weight</th><th>Side</th><th>Sector</th>
+      <th>Instrument</th><th class="num">Score</th>
+    </tr></thead><tbody id="book-body"></tbody></table></div>
+
+    <p class="muted small" id="week-run-link"></p>
+  </div>
+</section>
+
+<!-- ----------------------------------------------------------------------- run it -->
+<section id="panel-run" class="panel">
+  <div class="cards">
+    <div class="card">
+      <h3>This week's signal</h3>
+      <p>Builds the target book for the latest decision date and writes the order files.
+         This is the production command.</p>
+      <label class="inline"><span>Account equity</span>
+        <input id="signal-equity" type="number" step="1000" placeholder="from the ledger" /></label>
+      <button class="primary" data-job="signal">Run signal</button>
+    </div>
+
+    <div class="card">
+      <h3>Weekly refresh + signal</h3>
+      <p>Refreshes prices, pulls new news, then runs the signal. This is the one to put on
+         a scheduler — see the README for the <code>cron</code> line.</p>
+      <button class="primary" data-job="run-weekly">Run weekly</button>
+    </div>
+
+    <div class="card">
+      <h3>Backtest</h3>
+      <p>Walk-forward with purged cross-validation. The ablation is what tells you whether
+         the strategy beats doing nothing clever.</p>
+      <label class="check"><input id="bt-ablation" type="checkbox" checked /> Ablation — every null model and baseline</label>
+      <label class="check"><input id="bt-sensitivity" type="checkbox" /> Cost sensitivity — 0.5× to 3× the assumption</label>
+      <label class="check"><input id="bt-pbo" type="checkbox" /> PBO — does picking the best setup generalise (slow)</label>
+      <button class="primary" data-job="backtest">Run backtest</button>
+    </div>
+
+    <div class="card">
+      <h3>Synthetic demo data</h3>
+      <p>Generates a fake market with a known pattern baked in, so everything runs with no
+         data source and no API key.</p>
+      <label class="inline"><span>Years</span>
+        <input id="demo-years" type="number" value="8" min="2" max="25" /></label>
+      <button class="primary" data-job="demo">Generate demo data</button>
+    </div>
+  </div>
+
+  <h2>Job log</h2>
+  <p class="muted small">
+    One job runs at a time — these each build a full panel, and running several at once
+    would just make all of them slower. Jobs are not kept across a server restart; the run
+    folder is the permanent record.
+  </p>
+  <div id="job-status" class="job-status muted">No job running.</div>
+  <pre id="job-log" class="log" aria-live="polite"></pre>
+
+  <h3>Recent jobs</h3>
+  <div class="scroll"><table id="jobs-table"><thead><tr>
+    <th>Job</th><th>State</th><th>Started</th><th>Run</th><th></th>
+  </tr></thead><tbody id="jobs-body"></tbody></table></div>
+</section>
+
+<!-- -------------------------------------------------------------- honesty checks -->
+<section id="panel-checks" class="panel">
+  <p class="muted">
+    From the most recent backtest for this market. This is the part to read before trusting
+    any of the numbers: it is where the system reports on itself.
+  </p>
+  <div id="checks-empty" class="empty" hidden>
+    <p>No backtest for this market yet.</p>
+    <p class="muted">Run one from <b>Run it</b>, with <b>Ablation</b> ticked.</p>
+  </div>
+  <div id="checks-content" hidden>
+    <div class="kpis" id="checks-kpis"></div>
+    <h2>Verdicts</h2>
+    <ul class="verdicts" id="checks-verdicts"></ul>
+    <h2 id="checks-ablation-heading" hidden>Compared with doing nothing clever</h2>
+    <div class="scroll" id="checks-ablation"></div>
+    <h2 id="checks-cost-heading" hidden>If costs are worse than assumed</h2>
+    <div class="scroll" id="checks-cost"></div>
+    <h2 id="checks-pbo-heading" hidden>Probability of backtest overfitting</h2>
+    <div id="checks-pbo"></div>
+    <p class="muted small" id="checks-run-link"></p>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------------- run history -->
+<section id="panel-history" class="panel">
+  <p class="muted">
+    Every run writes a folder under <code>{{ runs_dir }}</code> containing its config, the
+    git revision, and its outputs. A run that saved its model can be reproduced exactly.
+  </p>
+  <div class="scroll"><table id="history-table"><thead><tr>
+    <th>Run</th><th>Command</th><th class="num">Sharpe</th><th class="num">Max DD</th>
+    <th>Config</th><th>Started</th><th></th>
+  </tr></thead><tbody id="history-body"></tbody></table></div>
+</section>
+
+<!-- ------------------------------------------------------------------------ health -->
+<section id="panel-health" class="panel">
+  <div id="health-content"></div>
+</section>
+
+</main>
+
+<div id="toast" class="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

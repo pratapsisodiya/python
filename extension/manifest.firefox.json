@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "swingbot order helper",
+  "version": "0.1.0",
+  "description": "Shows this week's swingbot orders and helps you place them at any broker. It never logs in and never places a trade for you.",
+
+  "permissions": ["storage", "alarms"],
+
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+
+  "action": {
+    "default_title": "swingbot orders",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+  },
+
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+
+  "background": { "scripts": ["background.js"] },
+
+  "options_ui": { "page": "options.html", "open_in_tab": false },
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "swingbot-order-helper@localhost",
+      "strict_min_version": "115.0"
+    }
+  }
+}

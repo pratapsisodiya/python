@@ -129,6 +129,126 @@ def test_no_network_calls_in_the_feature_or_model_path():
     assert not violations, "network access in the research path:\n  " + "\n  ".join(violations)
 
 
+# --------------------------------------------------------------------------------------
+# The web boundary
+#
+# The dashboard is a second front end onto the same pipeline, and it introduces three ways
+# to undermine the guarantees above. It could reach for the execution seam, which would put
+# a venue back inside the system with a credential attached. The core could start importing
+# it, which would make the research path depend on a web framework and turn a reproducible
+# computation into a service call. Or its imports could creep to module level, quietly
+# making a web stack mandatory for a CLI-only install.
+#
+# All three are cheap to check and impossible to spot in review six months from now.
+# --------------------------------------------------------------------------------------
+
+WEB_PREFIX = "swingbot/web/"
+
+#: `cli.py` is the one legitimate importer: `swingbot serve` has to be able to start it.
+WEB_IMPORTERS = ("swingbot/cli.py",)
+
+
+def test_nothing_outside_the_web_layer_imports_it():
+    """The dependency arrow points one way: web knows the pipeline, not the reverse.
+
+    This is what keeps a backtest reproducible from a bare interpreter. The moment a
+    feature, a model or the engine imports the dashboard, the research path acquires a
+    dependency on a web framework and on whatever request-scoped state that framework
+    happens to hold.
+    """
+    violations = []
+    for path in _python_files():
+        rel = _relative(path)
+        if rel.startswith(WEB_PREFIX) or rel in WEB_IMPORTERS:
+            continue
+        for module, line in _imports(path):
+            if module == "swingbot.web" or module.startswith("swingbot.web."):
+                violations.append(f"{rel}:{line} imports {module!r}")
+            # Relative forms of the same thing: `from .web import ...` inside the package.
+            if module.startswith("web.") or module == "web":
+                violations.append(f"{rel}:{line} imports {module!r}")
+
+    assert not violations, (
+        "the core imports the web layer:\n  "
+        + "\n  ".join(violations)
+        + "\n\nOnly swingbot/cli.py may import swingbot.web, so that `swingbot serve` can "
+        "start it. Everything else must work with no web dependencies installed."
+    )
+
+
+def test_the_web_layer_never_touches_the_execution_seam():
+    """The dashboard is read-only with respect to a broker, and this is the proof.
+
+    The user chose a dashboard that shows what the pipeline decided and records what they
+    placed by hand. That choice is a security boundary, not a feature gap: with no
+    order-submission path there is no reason for the app to hold a broker credential, and
+    therefore no credential for a bug or a hostile page in the same browser to reach.
+
+    What is asserted is the *import*, not a method name. An earlier version of this test
+    looked for calls to ``.submit(`` and immediately flagged ``ThreadPoolExecutor.submit``
+    in the job runner — the name is too common to carry a guarantee. The import boundary
+    is unambiguous: ``swingbot.execution`` is the only package that can construct an
+    adapter or hold an :class:`Order`, so a web module that cannot import it cannot place
+    a trade however it is written.
+
+    The dashboard does not need it. It reads ``orders.csv`` and ``book.json`` off disk,
+    and when it needs a signal produced it calls ``service.run_signal``, which owns the
+    adapter. Orders are still written to files — by the service, one layer down, exactly
+    as the CLI does it.
+    """
+    violations = []
+    for path in _python_files():
+        rel = _relative(path)
+        if not rel.startswith(WEB_PREFIX):
+            continue
+        for module, line in _imports(path):
+            # Absolute (`swingbot.execution...`) and relative (`..execution`) forms both.
+            if "execution" in module.split("."):
+                violations.append(f"{rel}:{line} imports {module!r}")
+
+    assert not violations, (
+        "the web layer reached for the execution seam:\n  "
+        + "\n  ".join(violations)
+        + "\n\nThe dashboard is read-only with respect to a broker: it shows what the "
+        "pipeline decided and records what the user placed themselves. It reads order "
+        "files off disk and calls service.run_signal to produce new ones; it must not "
+        "construct an adapter of its own. Keeping it that way is why this app needs no "
+        "credential."
+    )
+
+
+def test_the_web_layer_stays_optional():
+    """`import swingbot.web` must work with no web dependencies installed.
+
+    Enforced structurally rather than by an environment: the module-level imports of
+    ``swingbot/web/__init__.py`` may not include fastapi or uvicorn, so the check holds
+    even in a CI job that happens to have them. The heavy imports live inside
+    ``create_app`` and ``serve``.
+    """
+    init = PACKAGE_ROOT / "web" / "__init__.py"
+    tree = ast.parse(init.read_text(), filename=str(init))
+
+    top_level = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top_level.extend(alias.name.split(".")[0].lower() for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            top_level.append(node.module.split(".")[0].lower())
+        elif isinstance(node, ast.If):
+            # `if TYPE_CHECKING:` imports never execute, so they are not a real dependency.
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Import | ast.ImportFrom):
+                    top_level.append("__typing_only__")
+
+    web_stack = {"fastapi", "uvicorn", "starlette"}
+    offenders = sorted(web_stack.intersection(top_level))
+    assert not offenders, (
+        f"swingbot/web/__init__.py imports {offenders} at module level, so "
+        "`import swingbot.web` now requires the web extra. Move the import inside "
+        "create_app() or serve()."
+    )
+
+
 def test_execution_adapter_protocol_is_satisfied():
     """The shipped adapters really implement the protocol they claim to."""
     from swingbot.execution import (
@@ -184,7 +304,8 @@ def test_secrets_are_never_read_from_yaml():
     "swingbot.config", "swingbot.pit", "swingbot.calendars", "swingbot.types",
     "swingbot.data", "swingbot.features", "swingbot.model", "swingbot.validation",
     "swingbot.portfolio", "swingbot.backtest", "swingbot.news", "swingbot.execution",
-    "swingbot.report", "swingbot.notify", "swingbot.pipeline", "swingbot.cli",
+    "swingbot.report", "swingbot.notify", "swingbot.pipeline", "swingbot.service",
+    "swingbot.web", "swingbot.cli",
 ])
 def test_every_package_imports_cleanly(module):
     """No import-time side effects, and no missing optional dependency breaks a package."""

@@ -39,15 +39,14 @@ from __future__ import annotations
 import datetime as dt
 import pathlib
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
-import typer
 
-from swingbot.backtest import BacktestEngine, walk_forward_predict
+from swingbot.backtest import walk_forward_predict
 from swingbot.backtest.costs import CostModel
 from swingbot.config import Config, load_config
 from swingbot.features.pipeline import price_feature_columns
@@ -297,7 +296,7 @@ def _fixture_book(cfg: Config, *, with_prev: bool, seed: int = 3, with_mu: bool 
 
     previous = None
     if with_prev:
-        previous = {t: float(w) for t, w in zip(tickers[:8], np.linspace(0.02, 0.09, 8))}
+        previous = {t: float(w) for t, w in zip(tickers[:8], np.linspace(0.02, 0.09, 8), strict=True)}
 
     # Expected excess return over the hold window, in return units. This is what the
     # calibrator produces and what the Kelly ceiling needs; the score is not it. Scaled
@@ -433,7 +432,7 @@ def _observe_pinned_model(cfg: Config, bars) -> tuple:
     """
     from types import SimpleNamespace
 
-    from swingbot.cli import _load_pinned_model
+    from swingbot.service import ServiceError, load_pinned_model
 
     root = pathlib.Path(tempfile.gettempdir()) / "swingbot-liveness-pins"
     root.mkdir(parents=True, exist_ok=True)
@@ -441,10 +440,10 @@ def _observe_pinned_model(cfg: Config, bars) -> tuple:
 
     cfg = _set(cfg, "run.runs_dir", directory)
     try:
-        _load_pinned_model(
+        load_pinned_model(
             cfg, run_id, columns, SimpleNamespace(decision_session=PINNED_DECISION)
         )
-    except typer.Exit:
+    except ServiceError:
         return ("refused",)
     return ("accepted",)
 

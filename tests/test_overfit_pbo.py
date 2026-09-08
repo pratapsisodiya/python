@@ -123,13 +123,13 @@ def test_the_recorded_winner_is_the_in_sample_maximum(pbo_result):
     describing different runs, which is the kind of discrepancy nobody notices until the
     number is being defended.
     """
-    for row, scores in zip(pbo_result.selections, pbo_result.in_sample):
+    for row, scores in zip(pbo_result.selections, pbo_result.in_sample, strict=True):
         expected = pbo_result.candidates[int(np.nanargmax(scores))]
         assert row["chosen"] == expected, row
 
 
 def test_the_out_of_sample_rank_matches_the_matrix(pbo_result):
-    for row, oos in zip(pbo_result.selections, pbo_result.out_of_sample):
+    for row, oos in zip(pbo_result.selections, pbo_result.out_of_sample, strict=True):
         chosen = pbo_result.candidates.index(row["chosen"])
         expected_rank = int(np.argsort(np.argsort(-oos))[chosen]) + 1
         assert row["out_of_sample_rank"] == expected_rank, row

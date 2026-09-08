@@ -225,6 +225,10 @@ takes a few minutes.
 Either way, place the trades as close to the next session's open as you reasonably can —
 that's the price the whole system's math is built around.
 
+> **Tip.** The browser extension (see Step 5) turns this list into a checklist next to
+> your broker's tab, with copy buttons for the ticker and the quantity. It makes the
+> one-by-one route considerably less error-prone than reading numbers off a terminal.
+
 ### If you see `instrument: futures` (India only)
 
 Indian stock exchanges don't allow you to hold a plain stock (equity) short overnight — you
@@ -257,6 +261,58 @@ your own notes; the file just assumes you followed through.
 
 ---
 
+## Step 5: the web dashboard (optional, but much nicer)
+
+Everything above works from the terminal. If you'd rather *look* at it — a page you open,
+with the week's orders as a checklist, buttons to run things, and the honesty checks laid
+out — there's a small web app included.
+
+It runs **on your own computer**. There is no account, no cloud, and no broker connection.
+
+```bash
+# One extra install, for the web parts only
+pip install -e '.[web]'
+
+# Start it
+swingbot serve --market us
+```
+
+Then open <http://127.0.0.1:8765> in your browser. Five tabs:
+
+| Tab | What's on it |
+| --- | --- |
+| **This week** | The latest signal: orders to place with a tick box for each, the target book, and the portfolio's own notes (a risk limit that bound, orders trimmed for liquidity, and so on). |
+| **Run it** | Buttons for the demo, a backtest, this week's signal, and the weekly refresh. The pipeline's log streams live while it works, so a slow backtest shows you what it's doing. |
+| **Honesty checks** | The verdicts from the most recent backtest — the leak check, the "does news actually help" comparison, the deflated Sharpe, the overfitting probability. **Read this tab before you trust any number on the others.** |
+| **Run history** | Every run you've ever done, with a link to its report and a one-click copy of the `--use-model` command that reproduces it exactly. |
+| **Health** | Data coverage, the trading calendar, costs per round trip, which AI backend is set, and the survivorship-bias warning if it applies. |
+
+Ticking an order off marks it in the run folder, so the record of what you actually placed
+lives alongside everything else about that week.
+
+**A note on the address.** It binds to `127.0.0.1`, which means only your own computer can
+reach it. That matters: the page has buttons that run code, and there is no login. If you
+change `--host` to anything else, the command tells you so — don't, unless you know exactly
+why you're doing it.
+
+### The browser extension
+
+There's also a small browser extension in `extension/` that puts the same order checklist
+in your toolbar, next to your broker's tab. Click **copy** on a row and it gives you the
+ticker, click again and it gives you the quantity — which is exactly what an order ticket
+asks for, in that order. Tick the row when it's placed.
+
+See [`extension/README.md`](extension/README.md) for the two-minute install. It reads from
+the dashboard above, so `swingbot serve` needs to be running (there's a paste-the-CSV
+fallback if it isn't).
+
+It deliberately does **not** type into your broker's page for you. That would need
+permission to run code on live brokerage sites, it would break whenever a broker changed
+its layout, and a bug in that code would place a wrong trade with real money. Copying two
+fields is a few seconds slower and cannot misfire.
+
+---
+
 ## The weekly habit
 
 Once you're comfortable with the manual steps above, this is the whole loop, every week:
@@ -266,10 +322,35 @@ swingbot run-weekly --market us
 ```
 
 This refreshes prices, pulls in the latest news, and runs `signal` in one step. Do this
-once, after the close, on your market's last trading day of the week. Some people set this
-to run automatically with a scheduler (`cron` on Mac/Linux, Task Scheduler on Windows) —
-but running it by hand for the first several weeks, and reading the output each time, is
-the better habit while you're learning how it behaves.
+once, after the close, on your market's last trading day of the week. Or press **Run
+weekly** in the dashboard, which does the same thing.
+
+### Letting your computer do it
+
+Running it by hand for the first several weeks — and reading the output each time — is the
+better habit while you're learning how it behaves. Once you trust it, hand it to your
+operating system's scheduler.
+
+**Mac or Linux** (`crontab -e`). This example runs at 17:15 on Fridays; adjust for your
+market's close and your own timezone:
+
+```cron
+15 17 * * 5 cd /path/to/swingbot && /path/to/.venv/bin/swingbot run-weekly --market us >> ~/swingbot-weekly.log 2>&1
+```
+
+**Windows** — Task Scheduler, "Create Basic Task", weekly on Friday, action "Start a
+program":
+
+```
+Program:   C:\path\to\.venv\Scripts\swingbot.exe
+Arguments: run-weekly --market us
+Start in:  C:\path\to\swingbot
+```
+
+Two things worth knowing. The scheduler only runs while your computer is on and awake, so
+a laptop shut in a bag on Friday evening won't produce a signal. And a scheduled run still
+only *writes files* — it emails or messages you (if you configured that) and waits. Nothing
+places a trade.
 
 ---
 
@@ -287,6 +368,8 @@ the better habit while you're learning how it behaves.
       enabled, or have turned shorting off.
 - [ ] Never given this system, or anyone claiming to be it, your broker password or API
       key.
+- [ ] If using the dashboard, left it on `127.0.0.1` — it has no login, and it can start
+      jobs on your machine.
 
 ---
 
@@ -355,8 +438,15 @@ src/swingbot/
   backtest/       the historical simulation engine and cost model
   report/         the HTML report you open in a browser
   execution/      writes orders.csv / targets.json — the only broker-facing part
+  service.py      the commands themselves; both the terminal and the web app call these
+  web/            the local dashboard (optional install)
+extension/        the browser extension for placing orders
 tests/            the automated checks that catch bugs like this
 ```
+
+The `service.py` layer is worth one sentence: the terminal and the dashboard are both thin
+skins over it, so a number shown on the web page and the same number printed in a terminal
+came out of one function rather than two implementations that happen to agree today.
 
 ### Configuration
 
@@ -408,8 +498,12 @@ and most of this codebase — is checking honestly whether that list means anyth
 - **Every setting has to prove it does something.** A separate test takes each setting in
   the config file, runs the pipeline twice with two different values, and fails the build
   if the output is identical. A setting that quietly does nothing is worse than no setting,
-  because you'll believe you're protected by it. This test found three controls that were
+  because you'll believe you're protected by it. This test found four controls that were
   documented, configurable, and completely inert.
+- **The dashboard cannot grow a trade button.** A test reads the web code and fails the
+  build if it so much as imports the part of the system that talks to a venue. That's why
+  the web app needs no broker password: there is no code path that could use one, and it
+  stays that way by force rather than by good intentions.
 
 None of this guarantees profit. It's the difference between a system that can tell you
 "this doesn't work, don't trade it" and one that will always say yes.

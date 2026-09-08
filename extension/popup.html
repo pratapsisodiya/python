@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>swingbot orders</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <img src="icons/icon16.png" alt="" width="16" height="16" />
+      <span>swingbot orders</span>
+    </div>
+    <div class="head-actions">
+      <select id="market" aria-label="Market">
+        <option value="us">US</option>
+        <option value="india">India</option>
+      </select>
+      <button id="refresh" class="icon-btn" title="Reload from the dashboard" aria-label="Reload">&#x21bb;</button>
+      <button id="settings" class="icon-btn" title="Settings" aria-label="Settings">&#x2699;</button>
+    </div>
+  </header>
+
+  <div id="status" class="status" hidden></div>
+
+  <section id="meta" class="meta" hidden>
+    <div class="meta-line">
+      <strong id="meta-entry"></strong>
+      <span id="meta-progress" class="pill"></span>
+    </div>
+    <div class="meta-sub" id="meta-run"></div>
+  </section>
+
+  <div id="futures-warning" class="banner warn" hidden>
+    <strong>Short positions here are futures, not equity.</strong>
+    Rows marked <code>futures</code> must be placed on the <b>F&amp;O segment</b>, not equity
+    delivery — NSE delivery cannot be held short overnight. Placing one of these as a normal
+    sell will either be rejected or sell stock you do not own.
+  </div>
+
+  <div id="notes" class="notes" hidden></div>
+
+  <main>
+    <table id="orders-table" hidden>
+      <thead>
+        <tr>
+          <th class="col-done" aria-label="Placed"></th>
+          <th>Ticker</th>
+          <th>Side</th>
+          <th class="num">Qty</th>
+          <th class="num">Est. value</th>
+          <th class="col-copy" aria-label="Copy"></th>
+        </tr>
+      </thead>
+      <tbody id="orders-body"></tbody>
+    </table>
+
+    <div id="empty" class="empty" hidden></div>
+
+    <details id="paste-panel">
+      <summary>Dashboard not running? Paste <code>orders.csv</code> instead</summary>
+      <p class="hint">
+        Open <code>runs/&lt;run id&gt;/orders.csv</code> in any text editor, copy all of it, and
+        paste it here. Nothing is uploaded anywhere; it is parsed in this popup.
+      </p>
+      <textarea id="paste-input" rows="4" spellcheck="false"
+        placeholder="ticker,side,quantity,order_type,instrument,..."></textarea>
+      <button id="paste-load" class="primary">Load pasted orders</button>
+    </details>
+  </main>
+
+  <footer>
+    <span id="footer-note">This helper never signs in to your broker and never places a trade.</span>
+    <a id="open-dashboard" href="#" target="_blank" rel="noreferrer">Open dashboard</a>
+  </footer>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="client.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

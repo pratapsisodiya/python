@@ -1,14 +1,20 @@
 """Command line interface.
 
-Every command is a thin wrapper over :mod:`swingbot.pipeline`, so the demo, the backtest
-and the live weekly run all traverse the same code. ``signal`` is the only one meant for
-production; the rest are research tools.
+Every command here is a printer. The work happens in :mod:`swingbot.service`, which the
+web dashboard calls too, so a book shown on a screen and a book written to a run directory
+came from the same function rather than from two implementations that agree today.
+
+What belongs in this file: argument parsing, tables, colour, and turning a
+:class:`~swingbot.service.ServiceError` into a red line and a non-zero exit. What does not:
+anything that decides a position or computes a number.
+
+``signal`` is the only command meant for production; the rest are research tools.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -18,7 +24,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
-from .config import Config, available_markets, load_config
+from .config import Config, load_config
 
 app = typer.Typer(
     add_completion=False,
@@ -44,6 +50,17 @@ def _setup(market: str, profile: str | None, set_values: list[str] | None) -> Co
     return cfg
 
 
+def _fail(exc: Exception) -> typer.Exit:
+    """Render a service-level refusal and stop.
+
+    ``ServiceError`` means the request itself cannot be satisfied and the message is
+    already written for a person, so it is printed as-is rather than wrapped in a
+    traceback the user would have to read past.
+    """
+    console.print(f"[red]{exc}[/red]")
+    return typer.Exit(1)
+
+
 def _frame(title: str, frame: pd.DataFrame, *, max_rows: int = 40) -> None:
     if frame.empty:
         console.print(f"[dim]{title}: nothing to show[/dim]")
@@ -64,124 +81,6 @@ def _fmt(value) -> str:
     return str(value)
 
 
-def _calibrated_expected_returns(
-    cfg: Config,
-    train: pd.DataFrame,
-    scores: pd.Series,
-    model_factory,
-    feature_columns: list[str],
-) -> pd.Series | None:
-    """Map this week's scores to expected returns, or return None and say why.
-
-    Everything here happens on rows whose labels had already closed before the decision
-    date, so the map is built entirely from outcomes that had happened. It returns None
-    rather than a passthrough when it cannot fit: the constructor treats None as "no
-    Kelly ceiling available" and records that in the portfolio notes, which is the honest
-    outcome. A passthrough of raw scores would look like a calibrated return and reinstate
-    the exact bug this replaced.
-    """
-    from .backtest import walk_forward_predict
-    from .model.calibrate import ScoreCalibrator
-    from .validation.splits import PurgedWalkForward
-
-    if train.empty:
-        console.print("[yellow]sizing=kelly: no closed labels to calibrate on[/yellow]")
-        return None
-
-    splitter = PurgedWalkForward(
-        train_weeks=cfg.cv.train_weeks,
-        test_weeks=cfg.cv.test_weeks,
-        embargo_weeks=cfg.cv.embargo_weeks,
-        expanding=cfg.cv.expanding,
-        min_train_weeks=cfg.cv.min_train_weeks,
-    )
-    oos = walk_forward_predict(
-        train,
-        model_factory,
-        feature_columns=feature_columns,
-        splitter=splitter,
-        calibrate=False,
-    )
-    if oos.empty:
-        console.print(
-            "[yellow]sizing=kelly: not enough history for a single walk-forward fold, "
-            "so no expected return could be calibrated[/yellow]"
-        )
-        return None
-
-    calibrator = ScoreCalibrator()
-    calibrator.fitted_through = oos["decision_session"].max()
-    calibrator.fit(oos["prediction"], oos["label"])
-    if not calibrator.is_fitted:
-        console.print(f"[yellow]sizing=kelly: {calibrator.describe()}[/yellow]")
-        return None
-
-    console.print(f"[dim]{calibrator.describe()}[/dim]")
-    return calibrator.transform(scores)
-
-
-def _load_pinned_model(cfg: Config, run_id: str, feature_columns: list[str], decision):
-    """Load a saved model, refusing a schema mismatch and refusing a stale fit.
-
-    Two refusals, and they guard different failures.
-
-    A **schema mismatch** is silent corruption: if the feature set changed since the model
-    was fitted, the columns misalign and the estimator keeps producing confident numbers
-    that mean nothing. ``load_model`` raises rather than aligning by position.
-
-    A **stale fit** is a judgement call, which is why it is a config knob. Pinning exists
-    so a past decision can be reproduced exactly and a past trade explained. Using a fit
-    from a year ago to trade *this* week is a different act, and it should have to be
-    asked for explicitly rather than happening because a run id was convenient.
-    """
-    from .io.runs import find_run
-    from .model.registry import SchemaMismatchError, load_model
-
-    directory = find_run(cfg.run.runs_dir, run_id)
-    if directory is None:
-        console.print(
-            f"[red]no run matching {run_id!r} under {cfg.run.runs_dir}[/red] — "
-            "`swingbot runs` lists what is available"
-        )
-        raise typer.Exit(1)
-
-    try:
-        model, card = load_model(directory / "model", expected_features=feature_columns)
-    except FileNotFoundError:
-        console.print(
-            f"[red]run {directory.name} saved no model[/red] — only runs created after "
-            "model pinning was added carry one"
-        )
-        raise typer.Exit(1) from None
-    except SchemaMismatchError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from None
-
-    if card and card.train_end:
-        try:
-            trained_through = date.fromisoformat(card.train_end)
-        except ValueError:
-            trained_through = None
-        if trained_through is not None:
-            age_weeks = (decision.decision_session - trained_through).days / 7.0
-            if age_weeks > cfg.model.max_model_age_weeks:
-                console.print(
-                    f"[red]pinned model is {age_weeks:.0f} weeks stale[/red]: trained "
-                    f"through {trained_through}, decision is {decision.decision_session}, "
-                    f"limit is {cfg.model.max_model_age_weeks} weeks. Refit, or raise "
-                    "model.max_model_age_weeks if you meant to reproduce an old decision."
-                )
-                raise typer.Exit(1)
-
-    if card and card.config_hash != cfg.config_hash():
-        console.print(
-            "[yellow]the pinned model was fitted under a different config hash "
-            f"({card.config_hash[:8]} vs {cfg.config_hash()[:8]})[/yellow] — the model "
-            "reproduces, but sizing and cost settings may since have changed"
-        )
-    return model, card
-
-
 # --------------------------------------------------------------------------------------
 # doctor
 # --------------------------------------------------------------------------------------
@@ -195,84 +94,52 @@ def doctor(
 ) -> None:
     """Check the environment, data coverage, calendar and caches."""
     cfg = _setup(market, profile, set_values)
-    console.print(f"[bold]swingbot {__version__}[/bold] — {cfg.market_profile.display_name}")
-    console.print(f"config hash [cyan]{cfg.config_hash()}[/cyan]  markets: {', '.join(available_markets())}")
+    from .service import doctor_report
+
+    r = doctor_report(cfg)
+
+    console.print(f"[bold]swingbot {r.version}[/bold] — {r.display_name}")
+    console.print(
+        f"config hash [cyan]{r.config_hash}[/cyan]  markets: {', '.join(r.markets)}"
+    )
     console.print()
-
-    rows = []
-    for name, module in [
-        ("pandas", "pandas"), ("numpy", "numpy"), ("scikit-learn", "sklearn"),
-        ("lightgbm", "lightgbm"), ("duckdb", "duckdb"), ("anthropic", "anthropic"),
-        ("transformers", "transformers"),
-    ]:
-        try:
-            mod = __import__(module)
-            rows.append({"package": name, "status": "ok",
-                         "detail": getattr(mod, "__version__", "")})
-        except ImportError:
-            optional = name in ("lightgbm", "duckdb", "anthropic", "transformers")
-            rows.append({"package": name, "status": "optional" if optional else "MISSING",
-                         "detail": "not installed"})
-    _frame("packages", pd.DataFrame(rows))
-
-    from .backtest.costs import round_trip_bps
+    _frame("packages", pd.DataFrame(r.packages))
 
     console.print()
     console.print(
-        f"[bold]costs[/bold] round trip: long {round_trip_bps(cfg):.1f} bps, "
-        f"short {round_trip_bps(cfg, is_short=True):.1f} bps "
-        f"(shorts as {cfg.market_profile.short_instrument.value})"
+        f"[bold]costs[/bold] round trip: long {r.round_trip_long_bps:.1f} bps, "
+        f"short {r.round_trip_short_bps:.1f} bps (shorts as {r.short_instrument})"
     )
     console.print(
-        f"[bold]blend[/bold] price {cfg.model.blend.normalised[0]:.0%} / "
-        f"news {cfg.model.blend.normalised[1]:.0%}   "
-        f"[bold]nlp backend[/bold] {cfg.nlp.backend}"
+        f"[bold]blend[/bold] price {r.price_weight:.0%} / news {r.news_weight:.0%}   "
+        f"[bold]nlp backend[/bold] {r.nlp_backend}"
     )
 
-    try:
-        from .pipeline import load_bars
-
-        bars, universe = load_bars(cfg)
-        from .calendars import TradingCalendar
-
-        calendar = TradingCalendar.from_bars(bars, cfg)
-        grid = calendar.weekly_grid(cfg.calendar.hold_sessions)
+    if r.data_ready:
         console.print()
-        console.print(f"[bold]data[/bold] {len(bars):,} bars, {bars['ticker'].nunique()} tickers")
-        console.print(f"[bold]calendar[/bold] {calendar.describe()}")
-        console.print(f"[bold]grid[/bold] {len(grid)} decision weeks")
-        if grid:
-            latest = grid[-1]
+        console.print(f"[bold]data[/bold] {r.n_bars:,} bars, {r.n_tickers} tickers")
+        console.print(f"[bold]calendar[/bold] {r.calendar}")
+        console.print(f"[bold]grid[/bold] {r.n_weeks} decision weeks")
+        if r.latest_decision:
             console.print(
-                f"   latest: decide {latest.decision_session} -> "
-                f"enter {latest.entry_session} -> exit {latest.exit_session}"
+                f"   latest: decide {r.latest_decision} -> enter {r.latest_entry} "
+                f"-> exit {r.latest_exit}"
             )
-        warning = getattr(universe, "bias_warning", lambda: None)()
-        if warning:
-            console.print(f"[yellow]![/yellow] {warning}")
-    except Exception as exc:
-        console.print(f"\n[yellow]data not ready:[/yellow] {exc}")
+        if r.bias_warning:
+            console.print(f"[yellow]![/yellow] {r.bias_warning}")
+    else:
+        console.print(f"\n[yellow]data not ready:[/yellow] {r.data_error}")
 
-    cache_path = cfg.market_dir / "news_cache.sqlite"
-    if cache_path.exists():
-        from .io.cache import ContentCache
-
-        with ContentCache(cache_path) as cache:
-            stats = cache.stats()
+    if r.news_cache:
         console.print(
-            f"\n[bold]news cache[/bold] {stats['entries']} entr(ies), "
-            f"{stats['failed']} failed, {stats['total_spend_usd']:.2f} USD spent"
+            f"\n[bold]news cache[/bold] {r.news_cache['entries']} entr(ies), "
+            f"{r.news_cache['failed']} failed, "
+            f"{r.news_cache['total_spend_usd']:.2f} USD spent"
         )
-
-    trials_path = cfg.run.data_dir / "trials.sqlite"
-    if trials_path.exists():
-        from .validation.trials import TrialLedger
-
-        with TrialLedger(trials_path) as ledger:
-            summary = ledger.summary(cfg.market_profile.name)
+    if r.n_trial_configs:
         console.print(
-            f"[bold]trial ledger[/bold] {summary['n_configs']} distinct config(s) tried "
-            f"— this is the n in the deflated Sharpe"
+            f"[bold]trial ledger[/bold] {r.n_trial_configs} distinct config(s) tried "
+            "— this is the n in the deflated Sharpe"
         )
 
 
@@ -292,18 +159,20 @@ def demo(
 ) -> None:
     """Generate a synthetic market (and news corpus) so everything runs offline."""
     cfg = _setup(market, profile, set_values)
-    from .pipeline import analyze_demo_news, generate_demo_data, generate_demo_news
+    from .service import ServiceError, run_demo
 
-    directory = generate_demo_data(cfg, years=years, n_names=names)
-    console.print(f"[green]wrote synthetic prices[/green] {directory}")
+    try:
+        outcome = run_demo(cfg, years=years, n_names=names, with_news=with_news)
+    except ServiceError as exc:
+        raise _fail(exc) from None
 
-    if with_news:
-        path = generate_demo_news(cfg, n_names=names)
-        console.print(f"[green]wrote synthetic news[/green] {path}")
-        frame = analyze_demo_news(cfg)
-        console.print(f"[green]analysed[/green] {len(frame)} article(s) with {cfg.nlp.backend}")
-
-    console.print("\nnext: [cyan]swingbot backtest --market " + market + " --ablation[/cyan]")
+    console.print(f"[green]wrote synthetic prices[/green] {outcome.prices_path}")
+    if outcome.news_path is not None:
+        console.print(f"[green]wrote synthetic news[/green] {outcome.news_path}")
+        console.print(
+            f"[green]analysed[/green] {outcome.n_analysed} article(s) with {outcome.backend}"
+        )
+    console.print(f"\nnext: [cyan]swingbot backtest --market {market} --ablation[/cyan]")
 
 
 @app.command("fetch")
@@ -445,166 +314,66 @@ def backtest(
 ) -> None:
     """Walk-forward backtest with purged cross-validation."""
     cfg = _setup(market, profile, set_values)
-    from .backtest import (
-        BacktestEngine,
-        cost_sensitivity,
-        run_ablation,
-        run_pbo,
-        walk_forward_predict,
-    )
-    from .features.pipeline import news_feature_columns, price_feature_columns
-    from .io.runs import RunContext
-    from .model import BlendedModel, build_model
-    from .pipeline import build_market_data
-    from .validation.deflated import deflated_sharpe
-    from .validation.splits import PurgedWalkForward
-    from .validation.trials import Trial, TrialLedger
+    from .service import ServiceError, run_backtest
 
-    data = build_market_data(cfg)
-    if data.panel.empty:
-        console.print("[red]no modelling panel could be built[/red]")
-        raise typer.Exit(1)
-
-    panel = data.panel.dropna(subset=["label"])
-    console.print(
-        f"panel {panel.shape[0]:,} rows x {panel.shape[1]} cols, "
-        f"{panel['decision_session'].nunique()} weeks"
-    )
-
-    run = RunContext.create(
-        cfg.run.runs_dir, command="backtest", market=cfg.market_profile.name,
-        config_hash=cfg.config_hash(), config_yaml=cfg.to_yaml(),
-    )
-
-    price_cols = price_feature_columns(panel)
-    news_cols = news_feature_columns(panel)
-    console.print(f"features: {len(price_cols)} price, {len(news_cols)} news")
-
-    ablation_report = None
-    if ablation:
-        ablation_report = run_ablation(
-            panel, data.bars, data.calendar, cfg, grid=data.grid,
-            eligibility=data.eligibility, caveats=data.caveats,
-            include_news=bool(news_cols),
+    try:
+        out = run_backtest(
+            cfg, ablation=ablation, sensitivity=sensitivity, pbo=pbo, report=report
         )
-        _frame("ablation", ablation_report.table())
+    except ServiceError as exc:
+        raise _fail(exc) from None
+
+    console.print(
+        f"panel {out.panel_rows:,} rows, {out.panel_weeks} weeks; "
+        f"features: {out.n_price_features} price, {out.n_news_features} news"
+    )
+
+    if out.ablation is not None:
+        _frame("ablation", out.ablation.table())
         console.print()
-        for verdict in ablation_report.verdicts:
-            style = "red" if "LEAK WARNING" in verdict else "yellow" if "does not" in verdict else "green"
+        for verdict in out.verdicts:
+            style = (
+                "red" if "LEAK WARNING" in verdict
+                else "yellow" if "does not" in verdict
+                else "green"
+            )
             console.print(f"[{style}]•[/{style}] {verdict}")
-        result = (
-            ablation_report.results.get("price_news")
-            or ablation_report.results.get("price_only")
-        )
-        if result is None:
-            console.print("[red]no primary variant completed[/red]")
-            raise typer.Exit(1)
     else:
-        splitter = PurgedWalkForward(
-            train_weeks=cfg.cv.train_weeks, test_weeks=cfg.cv.test_weeks,
-            embargo_weeks=cfg.cv.embargo_weeks, expanding=cfg.cv.expanding,
-            min_train_weeks=cfg.cv.min_train_weeks,
-        )
-        pw, nw = cfg.model.blend.normalised
-        if news_cols:
-            factory = lambda: BlendedModel(  # noqa: E731
-                build_model(cfg.model.price_model, cfg, seed=cfg.run.seed),
-                build_model(cfg.model.news_model, cfg, seed=cfg.run.seed),
-                price_columns=price_cols, news_columns=news_cols,
-                price_weight=pw, news_weight=nw,
-            )
-            name = "price_news"
-        else:
-            factory = lambda: build_model(cfg.model.price_model, cfg, seed=cfg.run.seed)  # noqa: E731
-            name = "price_only"
+        _frame("result", pd.DataFrame([out.result.summary_row()]))
 
-        predictions = walk_forward_predict(
-            panel, factory, feature_columns=price_cols + news_cols, splitter=splitter
-        )
-        if predictions.empty:
-            console.print(
-                "[red]no out-of-sample predictions[/red] — not enough history for the "
-                f"configured folds (train {cfg.cv.train_weeks}w + test {cfg.cv.test_weeks}w)"
-            )
-            raise typer.Exit(1)
-        result = BacktestEngine(cfg).run(
-            predictions, data.bars, data.calendar, name=name, grid=data.grid,
-            eligibility=data.eligibility, caveats=data.caveats,
-        )
-        _frame("result", pd.DataFrame([result.summary_row()]))
-
-    # Trial ledger, then deflation against its real count.
-    ledger_path = cfg.run.data_dir / "trials.sqlite"
-    with TrialLedger(ledger_path) as ledger:
-        ledger.record(
-            Trial(
-                market=cfg.market_profile.name, config_hash=cfg.config_hash(),
-                run_id=run.run_id, git_revision=run.meta.get("git_revision", ""),
-                sharpe=result.metrics.sharpe, ann_return=result.metrics.ann_return,
-                max_drawdown=result.metrics.max_drawdown,
-                turnover=result.metrics.turnover, n_periods=result.metrics.n_periods,
-            )
-        )
-        n_trials = ledger.count(cfg.market_profile.name)
-        variance = ledger.sharpe_variance(cfg.market_profile.name)
-
-    deflated = deflated_sharpe(
-        result.returns, n_trials=n_trials, variance_of_trials=variance
-    )
     console.print(
-        f"\n[bold]deflated Sharpe[/bold] {n_trials} distinct config(s) tried, "
-        f"P(true Sharpe > 0) = {deflated.probability:.2f} — {deflated.verdict()}"
+        f"\n[bold]deflated Sharpe[/bold] {out.n_trials} distinct config(s) tried, "
+        f"P(true Sharpe > 0) = {out.deflated.probability:.2f} — {out.deflated.verdict()}"
     )
 
-    # PBO: not "is this result real" but "does choosing the best-looking configuration
-    # generalise at all". A different and less forgiving question than deflation, and the
-    # two belong next to each other in the report.
-    pbo_result = None
-    if pbo:
-        console.print("\n[dim]running combinatorial purged folds for PBO...[/dim]")
-        pbo_result = run_pbo(panel, cfg, feature_columns=price_cols + news_cols)
-        if pbo_result.is_valid:
-            _frame("PBO paths", pbo_result.table())
-            style = "red" if pbo_result.pbo > 0.5 else "yellow" if pbo_result.pbo > 0.25 else "green"
+    if out.pbo is not None:
+        if out.pbo.is_valid:
+            _frame("PBO paths", out.pbo.table())
+            style = (
+                "red" if out.pbo.pbo > 0.5 else "yellow" if out.pbo.pbo > 0.25 else "green"
+            )
             console.print(
-                f"[bold]PBO[/bold] {pbo_result.pbo:.2f} over {pbo_result.n_paths} path(s), "
-                f"{len(pbo_result.candidates)} candidate(s) — "
-                f"[{style}]{pbo_result.verdict()}[/{style}]"
+                f"[bold]PBO[/bold] {out.pbo.pbo:.2f} over {out.pbo.n_paths} path(s), "
+                f"{len(out.pbo.candidates)} candidate(s) — "
+                f"[{style}]{out.pbo.verdict()}[/{style}]"
             )
         else:
-            console.print(f"[yellow]PBO skipped: {pbo_result.verdict()}[/yellow]")
+            console.print(f"[yellow]PBO skipped: {out.pbo.verdict()}[/yellow]")
 
-    cost_rows = None
-    if sensitivity:
-        cost_rows = cost_sensitivity(
-            panel, data.bars, data.calendar, cfg, grid=data.grid,
-            eligibility=data.eligibility,
-        )
-        _frame("cost sensitivity", cost_rows)
+    if out.cost_rows is not None:
+        _frame("cost sensitivity", out.cost_rows)
 
-    run.write_frame(result.to_frame(), "weekly.csv", index=True)
-    run.write_json(result.metrics.to_dict(), "metrics.json")
-    if ablation_report is not None:
-        run.write_frame(ablation_report.table(), "ablation.csv")
-    if pbo_result is not None and pbo_result.is_valid:
-        run.write_json(pbo_result.to_dict(), "pbo.json")
-        run.write_frame(pbo_result.table(), "pbo_paths.csv")
+    for caveat in out.caveats:
+        console.print(f"[yellow]![/yellow] {caveat}")
 
-    if report:
-        from .report import open_in_browser, render_tearsheet
-
-        path = render_tearsheet(
-            result, cfg, output_path=run.path("tearsheet.html"),
-            ablation=ablation_report, cost_rows=cost_rows, deflated=deflated,
-            pbo=pbo_result,
-            run_id=run.run_id, git_revision=run.meta.get("git_revision", ""),
-        )
-        console.print(f"[green]tearsheet[/green] {path}")
+    if out.tearsheet is not None:
+        console.print(f"[green]tearsheet[/green] {out.tearsheet}")
         if open_report:
-            open_in_browser(path)
+            from .report import open_in_browser
 
-    run.finish(result.metrics.to_dict())
-    console.print(f"[dim]run artefacts: {run.directory}[/dim]")
+            open_in_browser(out.tearsheet)
+
+    console.print(f"[dim]run artefacts: {out.directory}[/dim]")
 
 
 # --------------------------------------------------------------------------------------
@@ -631,202 +400,39 @@ def signal(
 ) -> None:
     """Produce this week's target book and write order files. The production command."""
     cfg = _setup(market, profile, set_values)
-    from .execution import build_adapter, build_orders, orders_to_frame
-    from .features.pipeline import news_feature_columns, price_feature_columns
-    from .io.runs import RunContext
-    from .model import BlendedModel, build_model
-    from .model.registry import load_model, save_model
-    from .notify import build_notifiers, format_signal_message
-    from .pipeline import build_market_data
-    from .portfolio import PortfolioConstructor
-    from .types import RunMeta
+    from .service import ServiceError, run_signal
 
-    data = build_market_data(cfg)
-    panel = data.panel
-    if panel.empty:
-        console.print("[red]no panel[/red]")
-        raise typer.Exit(1)
+    try:
+        out = run_signal(cfg, asof=asof, equity=equity, notify=notify, use_model=use_model)
+    except ServiceError as exc:
+        raise _fail(exc) from None
 
-    asof_date = date.fromisoformat(asof) if asof else data.decision_sessions[-1]
-    decision = data.calendar.decision_for(asof_date, cfg.calendar.hold_sessions)
-    if decision is None:
-        console.print(f"[red]no decision date at or before {asof_date}[/red]")
-        raise typer.Exit(1)
-
-    price_cols = price_feature_columns(panel)
-    news_cols = news_feature_columns(panel)
-    pw, nw = cfg.model.blend.normalised
-
-    # Train on everything with a complete label and score the target week. The label is
-    # NaN for the most recent weeks precisely because their outcome has not happened.
-    labelled = panel.dropna(subset=["label"])
-    target_rows = panel.loc[panel["decision_session"] == decision.decision_session]
-    if target_rows.empty:
-        console.print(f"[red]no panel rows for {decision.decision_session}[/red]")
-        raise typer.Exit(1)
-
-    def make_model():
-        if news_cols:
-            return BlendedModel(
-                build_model(cfg.model.price_model, cfg, seed=cfg.run.seed),
-                build_model(cfg.model.news_model, cfg, seed=cfg.run.seed),
-                price_columns=price_cols, news_columns=news_cols,
-                price_weight=pw, news_weight=nw,
-            )
-        return build_model(cfg.model.price_model, cfg, seed=cfg.run.seed)
-
-    train = labelled.loc[labelled["label_t1"] < decision.decision_session]
-    feature_columns = price_cols + news_cols
-
-    # Load a pinned model, or fit one. Both paths converge on `model`; only the fitting
-    # path produces something worth saving.
-    #
-    # This command used to refit from scratch every week and save nothing, which meant the
-    # model that produced last week's orders no longer existed. A trade could be described
-    # but never explained, `SchemaMismatchError` could never fire, and "reproduce that
-    # decision" had no answer. Saving the fit and being able to pin it is what turns a run
-    # directory into an audit trail.
-    model_card = None
-    if use_model:
-        model, model_card = _load_pinned_model(cfg, use_model, feature_columns, decision)
+    if out.pinned_model:
+        trained = out.model_card.train_end if out.model_card else "unknown"
         console.print(
-            f"[cyan]using pinned model[/cyan] from {use_model} "
-            f"(trained through {model_card.train_end if model_card else 'unknown'})"
+            f"[cyan]using pinned model[/cyan] from {out.pinned_model} (trained through {trained})"
         )
-    else:
-        model = make_model()
-        if len(train) < 500:
-            console.print(
-                f"[yellow]only {len(train)} training rows with labels that closed before "
-                f"{decision.decision_session}[/yellow]"
-            )
-        model.fit(
-            train[feature_columns], train["label"],
-            sample_weight=train.get("sample_weight"), week_index=train["decision_session"],
-        )
+    if out.calibration:
+        console.print(f"[dim]{out.calibration}[/dim]")
 
-    scores = pd.Series(
-        model.predict(target_rows[feature_columns]).to_numpy(),
-        index=target_rows["ticker"].to_numpy(),
-    )
+    _frame(f"target book — enter at the open on {out.entry_session}", out.book_frame)
+    _frame("orders", out.orders_frame)
 
-    # Kelly needs an expected return, not a rank, and the only honest source of one is a
-    # map fitted on predictions that were genuinely out of sample when they were made. In
-    # a backtest `walk_forward_predict` supplies that per fold. Here there are no folds,
-    # so the folds are built: a purged walk-forward over the rows whose labels have
-    # already closed, then one isotonic fit on all of it.
-    #
-    # This costs a second pass over history and only runs when the config actually asks
-    # for Kelly. Without it `sizing: kelly` would work in the backtest and quietly do
-    # nothing in production, which is the worse half of the bug this pass removed.
-    expected_returns = None
-    if cfg.portfolio.sizing == "kelly":
-        expected_returns = _calibrated_expected_returns(
-            cfg, train, scores, make_model, feature_columns
-        )
-
-    # Sizing inputs, all trailing.
-    from .backtest.engine import _return_history, _rolling_stats, _weekly_return_panel
-
-    stats = _rolling_stats(data.bars).get(decision.decision_session, {})
-    history = _return_history(
-        _weekly_return_panel(data.bars, data.calendar),
-        decision.decision_session, scores.index,
-    )
-    eligible = None
-    if not data.eligibility.empty:
-        block = data.eligibility.loc[data.eligibility["session"] == decision.decision_session]
-        if not block.empty:
-            eligible = block.set_index("ticker")["liquid"].reindex(scores.index).fillna(False)
-
-    run = RunContext.create(
-        cfg.run.runs_dir, command="signal", market=cfg.market_profile.name,
-        config_hash=cfg.config_hash(), config_yaml=cfg.to_yaml(),
-        extra={"decision_session": str(decision.decision_session)},
-    )
-    if use_model:
-        run.meta["pinned_model"] = use_model
-        if model_card is not None:
-            run.write_json(model_card.to_dict(), "model/model_card.json")
-    else:
-        save_model(
-            model,
-            run.path("model"),
-            market=cfg.market_profile.name,
-            config_hash=cfg.config_hash(),
-            train_start=train["decision_session"].min() if not train.empty else None,
-            train_end=train["decision_session"].max() if not train.empty else None,
-            n_train_rows=len(train),
-            price_columns=price_cols,
-            news_columns=news_cols,
-            extra={"decision_session": str(decision.decision_session)},
-        )
-
-    adapter = build_adapter(cfg, run.directory, equity=equity)
-    account_equity = equity if equity is not None else adapter.account_equity()
-
-    portfolio = PortfolioConstructor.from_config(cfg).build(
-        scores,
-        decision_session=decision.decision_session,
-        entry_session=decision.entry_session,
-        volatility=stats.get("volatility"),
-        sectors=target_rows.set_index("ticker")["sector"],
-        returns_history=history,
-        previous_weights=adapter.current_positions() and None,
-        eligible=eligible,
-        adv_notional=stats.get("adv_notional"),
-        equity=account_equity,
-        expected_returns=expected_returns,
-    )
-    for note in portfolio.notes:
+    # The portfolio's notes are where it explains itself: a limit that bound, a capacity
+    # truncation, a Kelly ceiling that could not be applied. Printed after the tables,
+    # where someone reading the book will already have a question they answer.
+    for note in out.notes:
         console.print(f"[yellow]note:[/yellow] {note}")
-
-    last_close = (
-        data.bars.loc[data.bars["session"] == decision.decision_session]
-        .set_index("ticker")["close"].to_dict()
-    )
-    adapter.set_prices(last_close)
-    orders = build_orders(
-        portfolio, last_close, account_equity, adapter.current_positions(),
-        tag=f"{cfg.market_profile.name}-weekly",
-    )
-    meta = RunMeta(
-        run_id=run.run_id, market=cfg.market_profile.name,
-        decision_session=decision.decision_session, entry_session=decision.entry_session,
-        equity=account_equity, currency=cfg.market_profile.currency,
-        extra={"gross": portfolio.gross, "net": portfolio.net,
-               "risk_scale": portfolio.risk_scale},
-    )
-    report = adapter.submit(orders, meta)
-
-    from .portfolio.construct import weights_to_frame
-
-    _frame(f"target book — enter at the open on {decision.entry_session}",
-           weights_to_frame(portfolio))
-    _frame("orders", orders_to_frame(orders, last_close))
-    for message in report.messages:
+    for caveat in out.caveats:
+        console.print(f"[yellow]![/yellow] {caveat}")
+    for message in out.execution.messages:
         console.print(f"[green]{message}[/green]")
 
-    subject, body = format_signal_message(
-        portfolio, market=cfg.market_profile.name,
-        currency=cfg.market_profile.currency, equity=account_equity,
-        warnings=data.caveats,
-    )
-    from .report import render_signal_page
-
-    page = render_signal_page(
-        portfolio, cfg, output_path=run.path("signal.html"),
-        orders=orders_to_frame(orders, last_close), warnings=data.caveats,
-    )
-    console.print(f"[green]signal page[/green] {page}")
-
-    if notify:
-        for notifier in build_notifiers(cfg):
-            ok = notifier.send(subject, body, html=page.read_text())
-            console.print(f"{'[green]sent[/green]' if ok else '[yellow]failed[/yellow]'} via {notifier.name}")
-
-    run.finish({"n_positions": len(portfolio.positions), "n_orders": len(orders)})
-    console.print(f"[dim]run artefacts: {run.directory}[/dim]")
+    if out.page is not None:
+        console.print(f"[green]signal page[/green] {out.page}")
+    for line in out.notified:
+        console.print(f"[dim]notify[/dim] {line}")
+    console.print(f"[dim]run artefacts: {out.directory}[/dim]")
 
 
 # --------------------------------------------------------------------------------------
@@ -838,33 +444,37 @@ def signal(
 def run_weekly(
     market: MarketOpt = "us",
     lookback: Annotated[int, typer.Option(help="Days of news to fetch")] = 14,
+    equity: Annotated[float | None, typer.Option(help="Account equity for share sizing")] = None,
     profile: ProfileOpt = "live",
     set_values: SetOpt = None,
 ) -> None:
     """The scheduled command: refresh data, analyse news, emit the signal."""
     cfg = _setup(market, profile, set_values)
+    from .service import ServiceError
+
     console.print(f"[bold]weekly run[/bold] {cfg.market_profile.display_name} "
                   f"{datetime.now(UTC):%Y-%m-%d %H:%M UTC}")
 
-    from .pipeline import fetch_and_analyze_news, load_bars
+    from .service import run_weekly as _run_weekly
 
     try:
-        bars, _ = load_bars(cfg, refresh=True)
-        console.print(f"prices: {len(bars):,} bars to {bars['session'].max()}")
-    except Exception as exc:
-        console.print(f"[yellow]price refresh failed, using cache:[/yellow] {exc}")
+        out, messages = _run_weekly(cfg, lookback=lookback, equity=equity, notify=True)
+    except ServiceError as exc:
+        raise _fail(exc) from None
 
-    if cfg.features.news.enabled:
-        try:
-            frame = fetch_and_analyze_news(cfg, lookback_days=lookback)
-            console.print(f"news: {len(frame)} new analysis record(s)")
-        except Exception as exc:
-            console.print(f"[yellow]news step failed, continuing without it:[/yellow] {exc}")
+    # A refresh step that failed is reported, not swallowed: a book built on a stale cache
+    # is still worth having, but only if you know that is what you are looking at.
+    for message in messages:
+        style = "yellow" if "failed" in message else "dim"
+        console.print(f"[{style}]{message}[/{style}]")
 
-    signal(
-        market=market, asof=None, equity=None, notify=True,
-        profile=profile, set_values=set_values,
-    )
+    _frame(f"target book — enter at the open on {out.entry_session}", out.book_frame)
+    _frame("orders", out.orders_frame)
+    for note in out.notes:
+        console.print(f"[yellow]note:[/yellow] {note}")
+    for line in out.notified:
+        console.print(f"[dim]notify[/dim] {line}")
+    console.print(f"[dim]run artefacts: {out.directory}[/dim]")
 
 
 @app.command()
@@ -924,6 +534,52 @@ def runs(
         ]
     )
     _frame(f"runs under {cfg.run.runs_dir}", frame, max_rows=limit)
+
+
+@app.command()
+def serve(
+    market: MarketOpt = "us",
+    host: Annotated[str, typer.Option(help="Bind address. Keep it on loopback.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port to listen on")] = 8765,
+    open_browser: Annotated[bool, typer.Option("--open", help="Open the dashboard")] = False,
+    profile: ProfileOpt = None,
+    set_values: SetOpt = None,
+) -> None:
+    """Run the local web dashboard. Needs pip install 'swingbot\\[web]'."""
+    cfg = _setup(market, profile, set_values)
+    from .web import is_loopback
+    from .web import serve as serve_app
+
+    # No authentication, and the page has a button that runs code on this machine. On
+    # loopback that is fine — it is your own machine. On anything else it is a decision
+    # someone should make on purpose, so it is stated rather than discovered.
+    if not is_loopback(host):
+        console.print(
+            f"[red]![/red] binding to [bold]{host}[/bold], not loopback. The dashboard has "
+            "no login and can start jobs on this machine, so anyone who can reach this "
+            "address can run them. Use 127.0.0.1 unless you have a reason not to."
+        )
+
+    url = f"http://{host}:{port}"
+    console.print(f"[green]swingbot dashboard[/green] {url}   ({cfg.market_profile.display_name})")
+    console.print("[dim]read-only with respect to your broker — no credentials, no orders sent[/dim]")
+    console.print("[dim]ctrl-c to stop[/dim]")
+
+    if open_browser:
+        from .report import open_in_browser
+
+        open_in_browser(url)
+
+    try:
+        # The profile and overrides go through too, so a job started from the page
+        # resolves its config through the same layers this command did.
+        serve_app(cfg, host=host, port=port, profile=profile, set_values=list(set_values or []))
+    except RuntimeError as exc:
+        # The one expected RuntimeError here is the missing-optional-dependency message,
+        # which is already written for a person.
+        raise _fail(exc) from None
+    except KeyboardInterrupt:
+        console.print("\n[dim]stopped[/dim]")
 
 
 @app.command()
