@@ -277,6 +277,53 @@ def test_orders_carry_no_broker_vocabulary():
     }, f"Order has drifted toward a venue-specific shape: {sorted(names)}"
 
 
+def test_every_source_file_is_actually_committed():
+    """A package that exists on disk and not in git is a repository that cannot run.
+
+    This is not hypothetical. ``.gitignore`` carried an unanchored ``data/`` rule to keep
+    the market-data cache out of the repository. Unanchored, it also matched
+    ``src/swingbot/data/`` — so the entire data layer, ten modules including the provider
+    chain and the synthetic generator, was silently skipped by every ``git add``. Nothing
+    complained: the working tree ran perfectly, the tests passed, the push succeeded, and
+    a fresh clone could not import ``swingbot`` at all.
+
+    It is the same shape as the dead-config-knob bugs this suite was built to catch —
+    something that reports itself as working and is structurally absent — so it gets the
+    same treatment: an assertion rather than a habit.
+    """
+    import subprocess
+
+    repo = PACKAGE_ROOT.parent.parent
+    if not (repo / ".git").exists():
+        pytest.skip("not a git checkout")
+
+    tracked = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "src", "tests", "config"],
+        capture_output=True, text=True, check=False,
+    )
+    if tracked.returncode != 0:  # pragma: no cover - no git binary
+        pytest.skip("git is unavailable")
+
+    committed = {line for line in tracked.stdout.splitlines() if line}
+    on_disk = {
+        path.relative_to(repo).as_posix()
+        for directory in ("src", "tests", "config")
+        for path in (repo / directory).rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.parts
+        and path.suffix in {".py", ".yaml", ".yml", ".csv", ".j2", ".css", ".js", ".html"}
+    }
+
+    missing = sorted(on_disk - committed)
+    assert not missing, (
+        "source files exist on disk but are not tracked by git:\n  "
+        + "\n  ".join(missing)
+        + "\n\nUsually an over-broad .gitignore rule. Check with "
+        "`git check-ignore -v <path>` — an unanchored directory rule like `data/` matches "
+        "at every depth, so it needs a leading slash to mean 'only at the repository root'."
+    )
+
+
 def test_secrets_are_never_read_from_yaml():
     """Credentials come from the environment only, so a shared repo cannot leak one."""
     import yaml

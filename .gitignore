@@ -13,9 +13,15 @@ venv/
 .coverage
 htmlcov/
 
-# Runtime data — never commit market data, caches or run artifacts
-data/
-runs/
+# Runtime data — never commit market data, caches or run artifacts.
+#
+# Anchored with a leading slash so these match only the directories at the repository
+# root. Unanchored, `data/` also matches `src/swingbot/data/` at any depth — which
+# silently excluded the entire data layer, ten modules, from every commit. The push
+# succeeded, the working tree ran fine, and a fresh clone could not import swingbot at
+# all. Keep the slashes.
+/data/
+/runs/
 *.parquet
 *.sqlite
 *.sqlite-wal
