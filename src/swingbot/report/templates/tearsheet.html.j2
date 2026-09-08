@@ -217,6 +217,48 @@
 </section>
 {% endif %}
 
+{% if pbo %}
+<h2>Probability of backtest overfitting</h2>
+<section>
+  <div class="kpis">
+    <div class="kpi"><div class="label">PBO</div>
+      <div class="value {{ 'neg' if pbo.pbo > 0.5 else 'pos' }}">{{ '%.2f'|format(pbo.pbo) }}</div></div>
+    <div class="kpi"><div class="label">Combinatorial paths</div>
+      <div class="value">{{ pbo.n_paths }}</div></div>
+    <div class="kpi"><div class="label">Candidates compared</div>
+      <div class="value">{{ pbo.n_candidates }}</div></div>
+  </div>
+  <p class="note">
+    {{ pbo.verdict }}. Deflation asks whether <em>this</em> result survives the number of
+    trials run; PBO asks whether the act of <em>picking the best-looking one</em>
+    generalises. On each path every candidate is fitted on the training blocks and ranked
+    by in-sample information coefficient; PBO is the fraction of paths where that winner
+    then landed below the median out of sample. Above 0.50 the selection is worse than
+    choosing at random.
+  </p>
+  {% if pbo_rows %}
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Path</th><th>Test window</th><th>Chosen in sample</th>
+        <th>IS IC</th><th>OOS IC</th><th>OOS rank</th></tr></thead>
+      <tbody>
+      {% for row in pbo_rows %}
+        <tr>
+          <td>{{ row.path }}</td>
+          <td>{{ row.test_start }} to {{ row.test_end }}</td>
+          <td>{{ row.chosen }}</td>
+          <td>{{ '%.4f'|format(row.in_sample_ic) }}</td>
+          <td>{{ '%.4f'|format(row.out_of_sample_ic) }}</td>
+          <td>{{ row.out_of_sample_rank }} / {{ row.of }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
 {% if cost_rows %}
 <h2>Cost sensitivity</h2>
 <section>

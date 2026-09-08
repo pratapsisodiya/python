@@ -76,9 +76,20 @@ def apply_limits(
         else None
     )
 
-    # Start at the target gross so the caps below act on realistic sizes.
+    # Gross leverage is a CEILING, not a target: this only ever reduces the book.
+    #
+    # It used to normalise gross to exactly `gross_leverage` on entry, which silently
+    # erased everything upstream that had set the book's *size* rather than its shape.
+    # Volatility targeting is precisely such a step — it scales the whole vector — so
+    # `target_vol_annual` had no effect whatsoever: a 5 percent and a 30 percent target
+    # produced byte-identical books. The config advertised volatility targeting, the
+    # README described it, and the normalisation on the next line undid it.
+    #
+    # Sizing decides how big the book should be; limits decide how big it is allowed to
+    # be. Scaling up to "use" unused leverage inverts that relationship, and would also
+    # re-inflate positions that the capacity cap had just declared unreachable.
     gross = out.abs().sum()
-    if gross > 1e-12:
+    if gross > limits.gross_leverage:
         out = out * (limits.gross_leverage / gross)
 
     capped_names = 0

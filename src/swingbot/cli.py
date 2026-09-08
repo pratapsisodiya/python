@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Annotated
 
 import pandas as pd
@@ -61,6 +62,124 @@ def _fmt(value) -> str:
     if isinstance(value, float):
         return f"{value:,.4f}" if abs(value) < 1000 else f"{value:,.1f}"
     return str(value)
+
+
+def _calibrated_expected_returns(
+    cfg: Config,
+    train: pd.DataFrame,
+    scores: pd.Series,
+    model_factory,
+    feature_columns: list[str],
+) -> pd.Series | None:
+    """Map this week's scores to expected returns, or return None and say why.
+
+    Everything here happens on rows whose labels had already closed before the decision
+    date, so the map is built entirely from outcomes that had happened. It returns None
+    rather than a passthrough when it cannot fit: the constructor treats None as "no
+    Kelly ceiling available" and records that in the portfolio notes, which is the honest
+    outcome. A passthrough of raw scores would look like a calibrated return and reinstate
+    the exact bug this replaced.
+    """
+    from .backtest import walk_forward_predict
+    from .model.calibrate import ScoreCalibrator
+    from .validation.splits import PurgedWalkForward
+
+    if train.empty:
+        console.print("[yellow]sizing=kelly: no closed labels to calibrate on[/yellow]")
+        return None
+
+    splitter = PurgedWalkForward(
+        train_weeks=cfg.cv.train_weeks,
+        test_weeks=cfg.cv.test_weeks,
+        embargo_weeks=cfg.cv.embargo_weeks,
+        expanding=cfg.cv.expanding,
+        min_train_weeks=cfg.cv.min_train_weeks,
+    )
+    oos = walk_forward_predict(
+        train,
+        model_factory,
+        feature_columns=feature_columns,
+        splitter=splitter,
+        calibrate=False,
+    )
+    if oos.empty:
+        console.print(
+            "[yellow]sizing=kelly: not enough history for a single walk-forward fold, "
+            "so no expected return could be calibrated[/yellow]"
+        )
+        return None
+
+    calibrator = ScoreCalibrator()
+    calibrator.fitted_through = oos["decision_session"].max()
+    calibrator.fit(oos["prediction"], oos["label"])
+    if not calibrator.is_fitted:
+        console.print(f"[yellow]sizing=kelly: {calibrator.describe()}[/yellow]")
+        return None
+
+    console.print(f"[dim]{calibrator.describe()}[/dim]")
+    return calibrator.transform(scores)
+
+
+def _load_pinned_model(cfg: Config, run_id: str, feature_columns: list[str], decision):
+    """Load a saved model, refusing a schema mismatch and refusing a stale fit.
+
+    Two refusals, and they guard different failures.
+
+    A **schema mismatch** is silent corruption: if the feature set changed since the model
+    was fitted, the columns misalign and the estimator keeps producing confident numbers
+    that mean nothing. ``load_model`` raises rather than aligning by position.
+
+    A **stale fit** is a judgement call, which is why it is a config knob. Pinning exists
+    so a past decision can be reproduced exactly and a past trade explained. Using a fit
+    from a year ago to trade *this* week is a different act, and it should have to be
+    asked for explicitly rather than happening because a run id was convenient.
+    """
+    from .io.runs import find_run
+    from .model.registry import SchemaMismatchError, load_model
+
+    directory = find_run(cfg.run.runs_dir, run_id)
+    if directory is None:
+        console.print(
+            f"[red]no run matching {run_id!r} under {cfg.run.runs_dir}[/red] — "
+            "`swingbot runs` lists what is available"
+        )
+        raise typer.Exit(1)
+
+    try:
+        model, card = load_model(directory / "model", expected_features=feature_columns)
+    except FileNotFoundError:
+        console.print(
+            f"[red]run {directory.name} saved no model[/red] — only runs created after "
+            "model pinning was added carry one"
+        )
+        raise typer.Exit(1) from None
+    except SchemaMismatchError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+
+    if card and card.train_end:
+        try:
+            trained_through = date.fromisoformat(card.train_end)
+        except ValueError:
+            trained_through = None
+        if trained_through is not None:
+            age_weeks = (decision.decision_session - trained_through).days / 7.0
+            if age_weeks > cfg.model.max_model_age_weeks:
+                console.print(
+                    f"[red]pinned model is {age_weeks:.0f} weeks stale[/red]: trained "
+                    f"through {trained_through}, decision is {decision.decision_session}, "
+                    f"limit is {cfg.model.max_model_age_weeks} weeks. Refit, or raise "
+                    "model.max_model_age_weeks if you meant to reproduce an old decision."
+                )
+                raise typer.Exit(1)
+
+    if card and card.config_hash != cfg.config_hash():
+        console.print(
+            "[yellow]the pinned model was fitted under a different config hash "
+            f"({card.config_hash[:8]} vs {cfg.config_hash()[:8]})[/yellow] — the model "
+            "reproduces, but sizing and cost settings may since have changed"
+        )
+    return model, card
 
 
 # --------------------------------------------------------------------------------------
@@ -311,6 +430,14 @@ def backtest(
     market: MarketOpt = "us",
     ablation: Annotated[bool, typer.Option("--ablation", help="Run every null model and baseline")] = False,
     sensitivity: Annotated[bool, typer.Option("--sensitivity", help="Sweep cost assumptions")] = False,
+    pbo: Annotated[
+        bool,
+        typer.Option(
+            "--pbo",
+            help="Probability of backtest overfitting across combinatorial purged folds. "
+            "Expensive — many model fits — so it is off by default.",
+        ),
+    ] = False,
     report: Annotated[bool, typer.Option("--report/--no-report")] = True,
     open_report: Annotated[bool, typer.Option("--open", help="Open the tearsheet")] = False,
     profile: ProfileOpt = None,
@@ -318,7 +445,13 @@ def backtest(
 ) -> None:
     """Walk-forward backtest with purged cross-validation."""
     cfg = _setup(market, profile, set_values)
-    from .backtest import BacktestEngine, cost_sensitivity, run_ablation, walk_forward_predict
+    from .backtest import (
+        BacktestEngine,
+        cost_sensitivity,
+        run_ablation,
+        run_pbo,
+        walk_forward_predict,
+    )
     from .features.pipeline import news_feature_columns, price_feature_columns
     from .io.runs import RunContext
     from .model import BlendedModel, build_model
@@ -423,6 +556,24 @@ def backtest(
         f"P(true Sharpe > 0) = {deflated.probability:.2f} — {deflated.verdict()}"
     )
 
+    # PBO: not "is this result real" but "does choosing the best-looking configuration
+    # generalise at all". A different and less forgiving question than deflation, and the
+    # two belong next to each other in the report.
+    pbo_result = None
+    if pbo:
+        console.print("\n[dim]running combinatorial purged folds for PBO...[/dim]")
+        pbo_result = run_pbo(panel, cfg, feature_columns=price_cols + news_cols)
+        if pbo_result.is_valid:
+            _frame("PBO paths", pbo_result.table())
+            style = "red" if pbo_result.pbo > 0.5 else "yellow" if pbo_result.pbo > 0.25 else "green"
+            console.print(
+                f"[bold]PBO[/bold] {pbo_result.pbo:.2f} over {pbo_result.n_paths} path(s), "
+                f"{len(pbo_result.candidates)} candidate(s) — "
+                f"[{style}]{pbo_result.verdict()}[/{style}]"
+            )
+        else:
+            console.print(f"[yellow]PBO skipped: {pbo_result.verdict()}[/yellow]")
+
     cost_rows = None
     if sensitivity:
         cost_rows = cost_sensitivity(
@@ -435,6 +586,9 @@ def backtest(
     run.write_json(result.metrics.to_dict(), "metrics.json")
     if ablation_report is not None:
         run.write_frame(ablation_report.table(), "ablation.csv")
+    if pbo_result is not None and pbo_result.is_valid:
+        run.write_json(pbo_result.to_dict(), "pbo.json")
+        run.write_frame(pbo_result.table(), "pbo_paths.csv")
 
     if report:
         from .report import open_in_browser, render_tearsheet
@@ -442,6 +596,7 @@ def backtest(
         path = render_tearsheet(
             result, cfg, output_path=run.path("tearsheet.html"),
             ablation=ablation_report, cost_rows=cost_rows, deflated=deflated,
+            pbo=pbo_result,
             run_id=run.run_id, git_revision=run.meta.get("git_revision", ""),
         )
         console.print(f"[green]tearsheet[/green] {path}")
@@ -463,6 +618,14 @@ def signal(
     asof: Annotated[str | None, typer.Option(help="YYYY-MM-DD, defaults to the latest week")] = None,
     equity: Annotated[float | None, typer.Option(help="Account equity for share sizing")] = None,
     notify: Annotated[bool, typer.Option("--notify/--no-notify")] = True,
+    use_model: Annotated[
+        str | None,
+        typer.Option(
+            "--use-model",
+            help="Reuse the model saved by an earlier run (run id or unique prefix) "
+            "instead of refitting. This is what makes a past trade explainable.",
+        ),
+    ] = None,
     profile: ProfileOpt = None,
     set_values: SetOpt = None,
 ) -> None:
@@ -472,6 +635,7 @@ def signal(
     from .features.pipeline import news_feature_columns, price_feature_columns
     from .io.runs import RunContext
     from .model import BlendedModel, build_model
+    from .model.registry import load_model, save_model
     from .notify import build_notifiers, format_signal_message
     from .pipeline import build_market_data
     from .portfolio import PortfolioConstructor
@@ -501,30 +665,65 @@ def signal(
         console.print(f"[red]no panel rows for {decision.decision_session}[/red]")
         raise typer.Exit(1)
 
-    if news_cols:
-        model = BlendedModel(
-            build_model(cfg.model.price_model, cfg, seed=cfg.run.seed),
-            build_model(cfg.model.news_model, cfg, seed=cfg.run.seed),
-            price_columns=price_cols, news_columns=news_cols,
-            price_weight=pw, news_weight=nw,
-        )
-    else:
-        model = build_model(cfg.model.price_model, cfg, seed=cfg.run.seed)
+    def make_model():
+        if news_cols:
+            return BlendedModel(
+                build_model(cfg.model.price_model, cfg, seed=cfg.run.seed),
+                build_model(cfg.model.news_model, cfg, seed=cfg.run.seed),
+                price_columns=price_cols, news_columns=news_cols,
+                price_weight=pw, news_weight=nw,
+            )
+        return build_model(cfg.model.price_model, cfg, seed=cfg.run.seed)
 
     train = labelled.loc[labelled["label_t1"] < decision.decision_session]
-    if len(train) < 500:
+    feature_columns = price_cols + news_cols
+
+    # Load a pinned model, or fit one. Both paths converge on `model`; only the fitting
+    # path produces something worth saving.
+    #
+    # This command used to refit from scratch every week and save nothing, which meant the
+    # model that produced last week's orders no longer existed. A trade could be described
+    # but never explained, `SchemaMismatchError` could never fire, and "reproduce that
+    # decision" had no answer. Saving the fit and being able to pin it is what turns a run
+    # directory into an audit trail.
+    model_card = None
+    if use_model:
+        model, model_card = _load_pinned_model(cfg, use_model, feature_columns, decision)
         console.print(
-            f"[yellow]only {len(train)} training rows with labels that closed before "
-            f"{decision.decision_session}[/yellow]"
+            f"[cyan]using pinned model[/cyan] from {use_model} "
+            f"(trained through {model_card.train_end if model_card else 'unknown'})"
         )
-    model.fit(
-        train[price_cols + news_cols], train["label"],
-        sample_weight=train.get("sample_weight"), week_index=train["decision_session"],
-    )
+    else:
+        model = make_model()
+        if len(train) < 500:
+            console.print(
+                f"[yellow]only {len(train)} training rows with labels that closed before "
+                f"{decision.decision_session}[/yellow]"
+            )
+        model.fit(
+            train[feature_columns], train["label"],
+            sample_weight=train.get("sample_weight"), week_index=train["decision_session"],
+        )
+
     scores = pd.Series(
-        model.predict(target_rows[price_cols + news_cols]).to_numpy(),
+        model.predict(target_rows[feature_columns]).to_numpy(),
         index=target_rows["ticker"].to_numpy(),
     )
+
+    # Kelly needs an expected return, not a rank, and the only honest source of one is a
+    # map fitted on predictions that were genuinely out of sample when they were made. In
+    # a backtest `walk_forward_predict` supplies that per fold. Here there are no folds,
+    # so the folds are built: a purged walk-forward over the rows whose labels have
+    # already closed, then one isotonic fit on all of it.
+    #
+    # This costs a second pass over history and only runs when the config actually asks
+    # for Kelly. Without it `sizing: kelly` would work in the backtest and quietly do
+    # nothing in production, which is the worse half of the bug this pass removed.
+    expected_returns = None
+    if cfg.portfolio.sizing == "kelly":
+        expected_returns = _calibrated_expected_returns(
+            cfg, train, scores, make_model, feature_columns
+        )
 
     # Sizing inputs, all trailing.
     from .backtest.engine import _return_history, _rolling_stats, _weekly_return_panel
@@ -545,6 +744,24 @@ def signal(
         config_hash=cfg.config_hash(), config_yaml=cfg.to_yaml(),
         extra={"decision_session": str(decision.decision_session)},
     )
+    if use_model:
+        run.meta["pinned_model"] = use_model
+        if model_card is not None:
+            run.write_json(model_card.to_dict(), "model/model_card.json")
+    else:
+        save_model(
+            model,
+            run.path("model"),
+            market=cfg.market_profile.name,
+            config_hash=cfg.config_hash(),
+            train_start=train["decision_session"].min() if not train.empty else None,
+            train_end=train["decision_session"].max() if not train.empty else None,
+            n_train_rows=len(train),
+            price_columns=price_cols,
+            news_columns=news_cols,
+            extra={"decision_session": str(decision.decision_session)},
+        )
+
     adapter = build_adapter(cfg, run.directory, equity=equity)
     account_equity = equity if equity is not None else adapter.account_equity()
 
@@ -557,7 +774,12 @@ def signal(
         returns_history=history,
         previous_weights=adapter.current_positions() and None,
         eligible=eligible,
+        adv_notional=stats.get("adv_notional"),
+        equity=account_equity,
+        expected_returns=expected_returns,
     )
+    for note in portfolio.notes:
+        console.print(f"[yellow]note:[/yellow] {note}")
 
     last_close = (
         data.bars.loc[data.bars["session"] == decision.decision_session]
@@ -670,6 +892,38 @@ def trials(
         f"{summary['n_configs']} distinct config(s), best Sharpe "
         f"{summary.get('best_sharpe', 0):.2f}, median {summary.get('median_sharpe', 0):.2f}"
     )
+
+
+@app.command()
+def runs(
+    market: MarketOpt = "us",
+    limit: Annotated[int, typer.Option()] = 20,
+    profile: ProfileOpt = None,
+    set_values: SetOpt = None,
+) -> None:
+    """List recent runs. The run id is what `signal --use-model` takes."""
+    cfg = _setup(market, profile, set_values)
+    from .io.runs import list_runs
+
+    entries = list_runs(cfg.run.runs_dir, limit=limit)
+    if not entries:
+        console.print(f"[dim]no runs under {cfg.run.runs_dir}[/dim]")
+        return
+
+    frame = pd.DataFrame(
+        [
+            {
+                "run_id": e.get("run_id", ""),
+                "command": e.get("command", ""),
+                "market": e.get("market", ""),
+                "git": e.get("git_revision", ""),
+                "model": "yes" if (Path(cfg.run.runs_dir) / e.get("run_id", "") / "model" / "model.pkl").exists() else "",
+                "started_at": e.get("started_at", "")[:19],
+            }
+            for e in entries
+        ]
+    )
+    _frame(f"runs under {cfg.run.runs_dir}", frame, max_rows=limit)
 
 
 @app.command()

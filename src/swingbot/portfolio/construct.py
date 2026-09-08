@@ -19,6 +19,8 @@ allow.
 
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 
 from ..config import Config
@@ -29,6 +31,7 @@ from ..types import (
     TargetPortfolio,
     TargetPosition,
 )
+from .capacity import participation_capped_weights
 from .risk import RiskLimits, apply_limits
 from .sizing import (
     equal_weights,
@@ -37,6 +40,8 @@ from .sizing import (
     scale_to_target_vol,
     shrunk_covariance,
 )
+
+log = logging.getLogger(__name__)
 
 
 class PortfolioConstructor:
@@ -55,6 +60,7 @@ class PortfolioConstructor:
         max_weight: float = 0.12,
         max_sector_weight: float = 0.35,
         no_trade_band: float = 0.005,
+        max_participation_adv: float = 0.05,
         allow_short: bool = True,
         short_instrument: ShortInstrument = ShortInstrument.CASH_EQUITY,
     ) -> None:
@@ -64,6 +70,7 @@ class PortfolioConstructor:
         self.sizing = sizing
         self.kelly_fraction = kelly_fraction
         self.no_trade_band = no_trade_band
+        self.max_participation_adv = max_participation_adv
         self.allow_short = allow_short
         self.short_instrument = short_instrument
         self.limits = RiskLimits(
@@ -89,6 +96,7 @@ class PortfolioConstructor:
             max_weight=cfg.portfolio.max_weight,
             max_sector_weight=cfg.portfolio.max_sector_weight,
             no_trade_band=cfg.portfolio.no_trade_band,
+            max_participation_adv=cfg.portfolio.max_participation_adv,
             allow_short=cfg.shorts_allowed,
             short_instrument=profile.short_instrument,
         )
@@ -107,6 +115,9 @@ class PortfolioConstructor:
         previous_weights: dict[str, float] | None = None,
         risk_scale: float = 1.0,
         eligible: pd.Series | None = None,
+        adv_notional: pd.Series | None = None,
+        equity: float | None = None,
+        expected_returns: pd.Series | None = None,
     ) -> TargetPortfolio:
         """Build this week's target book."""
         notes: list[str] = []
@@ -137,7 +148,10 @@ class PortfolioConstructor:
             portfolio.notes = notes + ["no names selected"]
             return portfolio
 
-        weights = self._size(selected, volatility, returns_history)
+        weights, sizing_notes = self._size(
+            selected, volatility, returns_history, expected_returns
+        )
+        notes.extend(sizing_notes)
         weights = weights * risk_scale
 
         weights, limit_notes = apply_limits(
@@ -167,6 +181,41 @@ class PortfolioConstructor:
                 weights, limits=self.limits, sectors=sectors
             )
             notes.extend(n for n in recheck_notes if n not in limit_notes)
+
+        # Capacity: truncate any weight CHANGE that would demand more of a name's daily
+        # volume than the participation cap allows.
+        #
+        # Applied to the change, not the position: holding a large position in a liquid
+        # name is fine, acquiring it in a single session is not. A backtest that trades
+        # 20 percent of a name's daily volume is not describing something anyone could
+        # have executed, and the cap is what converts "this strategy works" into "this
+        # strategy works up to this much capital".
+        #
+        # Ordering repeats the lesson from the no-trade band: truncating a change leaves
+        # the book off-target, so the hard limits are re-applied afterwards and stay the
+        # final authority.
+        if self.max_participation_adv > 0 and adv_notional is not None and equity:
+            previous = pd.Series(previous_weights or {}, dtype=float)
+            capped, truncated = participation_capped_weights(
+                weights,
+                previous,
+                adv_notional,
+                float(equity),
+                max_participation=self.max_participation_adv,
+            )
+            if truncated:
+                worst = sorted(truncated.items(), key=lambda kv: -kv[1])[:3]
+                shown = ", ".join(f"{t} by {v:.2%}" for t, v in worst)
+                notes.append(
+                    f"{len(truncated)} order(s) truncated by the "
+                    f"{self.max_participation_adv:.1%} participation cap ({shown})"
+                )
+                weights, capacity_notes = apply_limits(
+                    capped, limits=self.limits, sectors=sectors
+                )
+                notes.extend(n for n in capacity_notes if n not in notes)
+            else:
+                weights = capped
 
         weights = weights[weights.abs() > 1e-9]
 
@@ -230,16 +279,30 @@ class PortfolioConstructor:
         selected: pd.Series,
         volatility: pd.Series | None,
         returns_history: pd.DataFrame | None,
-    ) -> pd.Series:
+        expected_returns: pd.Series | None = None,
+    ) -> tuple[pd.Series, list[str]]:
+        """Signed selections to weights, with the Kelly ceiling applied last.
+
+        Order matters, and it used to be wrong. The Kelly cap ran *before* the gross
+        normalisation and the volatility scaling, both of which multiply the whole vector.
+        Whatever the cap took off was handed straight back on the next line: the book
+        still changed shape, so the knob looked alive, but the resulting weights sat above
+        the ceiling that had supposedly just been applied. Same failure as the volatility
+        target being erased by the gross renormalisation in ``apply_limits``, and the
+        reason ``test_kelly_ceiling_is_never_exceeded`` asserts the bound directly rather
+        than merely asserting that the setting does something.
+
+        A ceiling has to be the last thing that touches the weights. So the sizing rule
+        runs, the book is scaled to its gross and to its volatility target, and only then
+        does Kelly trim whatever still exceeds its limit. Trimming only ever reduces, so
+        nothing downstream can undo it.
+        """
+        notes: list[str] = []
+
         if self.sizing == "equal" or volatility is None or volatility.empty:
             weights = equal_weights(selected)
         else:
             weights = inverse_vol_weights(selected, volatility)
-
-        if self.sizing == "kelly" and volatility is not None:
-            weights = kelly_cap(
-                weights, selected, volatility, fraction=self.kelly_fraction
-            )
 
         weights = weights * self.limits.gross_leverage / max(weights.abs().sum(), 1e-12)
 
@@ -255,7 +318,68 @@ class PortfolioConstructor:
                 target_vol=self.target_vol_annual,
                 fallback_vol=volatility,
             )
-        return weights
+
+        if self.sizing == "kelly":
+            weights, kelly_note = self._apply_kelly(weights, volatility, expected_returns)
+            if kelly_note:
+                notes.append(kelly_note)
+
+        return weights, notes
+
+    def _apply_kelly(
+        self,
+        weights: pd.Series,
+        volatility: pd.Series | None,
+        expected_returns: pd.Series | None,
+    ) -> tuple[pd.Series, str]:
+        """Apply the fractional Kelly ceiling, or refuse loudly and fall back.
+
+        ``kelly_cap`` needs an expected return over the hold window. What it used to be
+        handed was ``selected`` — a cross-sectional rank in roughly [-0.5, 0.5] — which
+        against 35 percent volatility implies a ceiling near 0.6 against weights near
+        0.07. The ``min()`` could not bind. A risk control that cannot fire is worse than
+        no risk control, because the config advertises it.
+
+        The real quantity comes from :mod:`swingbot.model.calibrate`, and it is not always
+        available: the first walk-forward fold has no earlier fold to calibrate on. When
+        it is missing, this falls back to plain inverse-vol sizing and *says so* in the
+        portfolio notes. Silently sizing as if a ceiling had been applied is exactly the
+        failure this whole pass exists to remove.
+        """
+        if weights.empty or self.kelly_fraction <= 0:
+            return weights, ""
+
+        if volatility is None or volatility.empty:
+            return weights, (
+                "sizing=kelly requested but no volatility estimate was available; "
+                "no Kelly ceiling applied"
+            )
+
+        mu = (
+            expected_returns.reindex(weights.index).astype(float)
+            if expected_returns is not None
+            else pd.Series(float("nan"), index=weights.index)
+        )
+        n_missing = int(mu.isna().sum())
+        if n_missing == len(mu):
+            log.warning(
+                "sizing=kelly but no calibrated expected return is available for any of "
+                "the %d selected name(s); falling back to inverse-vol with no ceiling",
+                len(mu),
+            )
+            return weights, (
+                "sizing=kelly requested but no calibrated expected return was available; "
+                "fell back to inverse-vol sizing with NO Kelly ceiling"
+            )
+
+        capped = kelly_cap(weights, mu, volatility, fraction=self.kelly_fraction)
+        bound = int((capped.abs() < weights.abs() - 1e-12).sum())
+        parts = []
+        if bound:
+            parts.append(f"{bound} position(s) trimmed by the Kelly ceiling")
+        if n_missing:
+            parts.append(f"{n_missing} name(s) had no calibrated mu and were left uncapped")
+        return capped, "; ".join(parts)
 
     def _apply_no_trade_band(
         self, target: pd.Series, previous: dict[str, float]

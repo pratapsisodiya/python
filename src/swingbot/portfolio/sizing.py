@@ -152,16 +152,27 @@ def kelly_cap(
     Kelly for a single asset is ``mu / sigma^2``. Both inputs are estimates, ``mu``
     especially, so this is applied as a ceiling on weights that were sized some other
     way, never as the sizing rule itself.
+
+    ``expected_returns`` must be an actual expected return over the hold window, on the
+    same scale as ``volatility``. Handing it a cross-sectional rank instead does not
+    fail — it just produces a ceiling one or two orders of magnitude too high to ever
+    bind, which is what this function did until :mod:`swingbot.model.calibrate` existed
+    to supply the real quantity. See ``tests/test_portfolio_limits.py``.
     """
     if weights.empty or fraction <= 0:
         return weights
 
-    mu = expected_returns.reindex(weights.index).fillna(0.0).astype(float)
+    mu = expected_returns.reindex(weights.index).astype(float)
     sigma = volatility.reindex(weights.index).astype(float)
     sigma = sigma.fillna(sigma.median()).clip(lower=1e-3)
 
     kelly = (mu / (sigma**2)).abs() * fraction
-    capped = np.sign(weights) * np.minimum(weights.abs(), kelly.clip(upper=1.0))
+    # A name with no expected return gets no ceiling, rather than a ceiling of zero.
+    # This previously read ``.fillna(0.0)`` on ``mu``, which turns a missing estimate into
+    # a hard instruction to hold nothing — deleting the position instead of declining to
+    # cap it. Missing information is not evidence of zero edge.
+    ceiling = kelly.clip(upper=1.0).fillna(np.inf)
+    capped = np.sign(weights) * np.minimum(weights.abs(), ceiling)
     return capped
 
 

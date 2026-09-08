@@ -73,7 +73,12 @@ def test_long_short_book_is_built_for_both_markets(market):
     )
     assert portfolio.n_long == cfg.portfolio.n_long
     assert portfolio.n_short == cfg.portfolio.n_short
-    assert portfolio.gross == pytest.approx(cfg.portfolio.gross_leverage, abs=0.05)
+    # Gross leverage is a ceiling, not a target. Volatility targeting decides how big the
+    # book should be and the leverage limit caps it, so a book that comes in under the
+    # limit is correct rather than a shortfall. Asserting equality here would re-encode
+    # the bug that made `target_vol_annual` inert.
+    assert portfolio.gross <= cfg.portfolio.gross_leverage + 1e-6
+    assert portfolio.gross > 0.0
 
 
 def test_india_shorts_use_futures_and_us_shorts_do_not():
@@ -194,3 +199,250 @@ def test_ineligible_names_are_excluded():
         decision_session=SESSIONS[0], entry_session=SESSIONS[1], eligible=eligible,
     )
     assert all(int(p.ticker[1:]) % 2 == 0 for p in portfolio.positions)
+
+
+def test_volatility_targeting_actually_changes_book_size():
+    """A tighter volatility target must produce a smaller book.
+
+    This was inert for the whole first version of the system: `apply_limits` normalised
+    gross to `gross_leverage` on entry, so the scale that volatility targeting had just
+    applied was immediately erased and a 5 percent target produced a byte-identical book
+    to a 30 percent one. The config advertised it and the README described it.
+    """
+    rng = np.random.default_rng(5)
+    tickers = [f"T{i:02d}" for i in range(40)]
+    scores = pd.Series(rng.normal(0, 1, 40), index=tickers)
+    vol = pd.Series(np.abs(rng.normal(0.35, 0.10, 40)), index=tickers)
+    sectors = pd.Series([f"S{i % 8}" for i in range(40)], index=tickers)
+
+    def gross_at(target_vol: float) -> float:
+        cfg = load_config(
+            "us",
+            set_values=[
+                f"portfolio.target_vol_annual={target_vol}",
+                # Loosen the caps so this measures volatility targeting rather than
+                # whichever concentration limit binds first.
+                "portfolio.max_weight=0.9",
+                "portfolio.max_sector_weight=1.0",
+                "portfolio.max_net_exposure=1.0",
+            ],
+        )
+        book = PortfolioConstructor.from_config(cfg).build(
+            scores, decision_session=SESSIONS[0], entry_session=SESSIONS[1],
+            volatility=vol, sectors=sectors,
+        )
+        return book.gross
+
+    tight, loose = gross_at(0.04), gross_at(0.25)
+    assert tight < loose, (
+        f"a 4% volatility target produced gross {tight:.3f} and a 25% target "
+        f"{loose:.3f}. Volatility targeting is not sizing the book."
+    )
+
+
+def test_gross_leverage_is_never_exceeded_even_at_a_high_vol_target():
+    """The ceiling still holds when volatility targeting wants a bigger book."""
+    rng = np.random.default_rng(6)
+    tickers = [f"T{i:02d}" for i in range(40)]
+    cfg = load_config(
+        "us",
+        set_values=["portfolio.target_vol_annual=2.0", "portfolio.max_weight=0.9",
+                    "portfolio.max_sector_weight=1.0"],
+    )
+    book = PortfolioConstructor.from_config(cfg).build(
+        pd.Series(rng.normal(0, 1, 40), index=tickers),
+        decision_session=SESSIONS[0], entry_session=SESSIONS[1],
+        volatility=pd.Series(np.full(40, 0.05), index=tickers),
+        sectors=pd.Series([f"S{i % 8}" for i in range(40)], index=tickers),
+    )
+    assert book.gross <= cfg.portfolio.gross_leverage + 1e-6
+
+
+def test_participation_cap_truncates_and_reports():
+    """The capacity cap must bind on an illiquid book and say so.
+
+    `max_participation_adv` shipped in the config, documented as capping orders at a
+    fraction of average daily volume, and nothing in the pipeline read it.
+    """
+    rng = np.random.default_rng(7)
+    tickers = [f"T{i:02d}" for i in range(30)]
+    scores = pd.Series(rng.normal(0, 1, 30), index=tickers)
+    vol = pd.Series(np.abs(rng.normal(0.35, 0.1, 30)), index=tickers)
+    # Deliberately thin names against a large account: every order should be capacity
+    # constrained.
+    adv = pd.Series(np.full(30, 50_000.0), index=tickers)
+
+    cfg = load_config("us", set_values=["portfolio.max_participation_adv=0.05"])
+    book = PortfolioConstructor.from_config(cfg).build(
+        scores, decision_session=SESSIONS[0], entry_session=SESSIONS[1],
+        volatility=vol, adv_notional=adv, equity=50_000_000.0,
+    )
+    assert any("participation cap" in n for n in book.notes), (
+        f"a 50m account trading names with 50k daily volume was not capacity capped; "
+        f"notes were {book.notes}"
+    )
+    assert book.gross < cfg.portfolio.gross_leverage, (
+        "a capacity-constrained book must run smaller, not be rescaled back to full gross"
+    )
+
+
+def test_capacity_cap_is_not_rescaled_away():
+    """Truncated orders must stay truncated.
+
+    Re-normalising gross after a capacity truncation would re-inflate exactly the
+    positions the cap just declared unreachable, which is the subtle way a capacity
+    control becomes decorative.
+    """
+    rng = np.random.default_rng(8)
+    tickers = [f"T{i:02d}" for i in range(30)]
+    scores = pd.Series(rng.normal(0, 1, 30), index=tickers)
+    adv = pd.Series(np.full(30, 500_000.0), index=tickers)
+
+    def gross_at(cap: float) -> float:
+        cfg = load_config("us", set_values=[f"portfolio.max_participation_adv={cap}"])
+        return PortfolioConstructor.from_config(cfg).build(
+            scores, decision_session=SESSIONS[0], entry_session=SESSIONS[1],
+            adv_notional=adv, equity=2_000_000.0,
+        ).gross
+
+    # Sized so the tight cap still clears the dust threshold: an allowed weight below
+    # `min_position_weight` empties the book entirely and both sides would read zero,
+    # which would pass a naive inequality for the wrong reason.
+    tight, loose = gross_at(0.02), gross_at(1.0)
+    assert tight > 0.0, "the tight cap emptied the book; choose a less extreme fixture"
+    assert tight < loose, (
+        f"a tighter participation cap gave gross {tight:.4f} versus {loose:.4f} — "
+        "truncated orders are being rescaled back up"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# The Kelly ceiling
+#
+# It shipped in the config as a risk control and could not fire, for two independent
+# reasons. `construct._size` handed `kelly_cap` the cross-sectional score as `mu` — a rank
+# in roughly [-0.5, 0.5], not a return — which puts the implied ceiling an order of
+# magnitude above any weight the book runs. And the cap was applied *before* the gross
+# normalisation, which multiplies the whole vector and hands straight back whatever the
+# cap took off.
+#
+# Each test below fails if either regression returns.
+# --------------------------------------------------------------------------------------
+
+
+def _kelly_book(fraction: float, *, mu_scale: float = 0.01, n: int = 30, seed: int = 11):
+    rng = np.random.default_rng(seed)
+    tickers = [f"K{i:02d}" for i in range(n)]
+    scores = pd.Series(rng.normal(0, 1, n), index=tickers)
+    vol = pd.Series(np.abs(rng.normal(0.35, 0.05, n)) + 0.10, index=tickers)
+    expected = scores * mu_scale
+
+    cfg = load_config(
+        "us",
+        set_values=[
+            "portfolio.sizing=kelly",
+            f"portfolio.kelly_fraction={fraction}",
+            # Loosened so the ceiling under test is the thing that binds, not the
+            # per-name cap that would clip the same weights for a different reason.
+            "portfolio.max_weight=0.90",
+            "portfolio.max_sector_weight=1.0",
+            "portfolio.max_net_exposure=1.0",
+        ],
+    )
+    book = PortfolioConstructor.from_config(cfg).build(
+        scores, decision_session=SESSIONS[0], entry_session=SESSIONS[1],
+        volatility=vol, expected_returns=expected,
+    )
+    return book, expected, vol
+
+
+def test_kelly_ceiling_is_never_exceeded():
+    """Every final weight must sit under its own fractional-Kelly limit.
+
+    This is the assertion the ordering bug fails: capping and then re-normalising gross
+    restores the very weights the cap removed, so the book ends up above the ceiling
+    while still *looking* like it was capped.
+    """
+    fraction = 0.10
+    book, expected, vol = _kelly_book(fraction)
+    assert book.positions, "fixture produced an empty book"
+
+    for position in book.positions:
+        mu = float(expected[position.ticker])
+        sigma = float(vol[position.ticker])
+        ceiling = min(abs(mu) / sigma**2 * fraction, 1.0)
+        assert abs(position.weight) <= ceiling + 1e-9, (
+            f"{position.ticker} carries weight {position.weight:+.4f} against a "
+            f"fractional-Kelly ceiling of {ceiling:.4f}"
+        )
+
+
+def test_kelly_fraction_changes_the_book():
+    """A tighter fraction must produce a smaller book. Otherwise it is decorative."""
+    tight, _, _ = _kelly_book(0.05)
+    loose, _, _ = _kelly_book(5.0)
+    assert tight.gross < loose.gross, (
+        f"kelly_fraction 0.05 gave gross {tight.gross:.4f} and 5.0 gave "
+        f"{loose.gross:.4f} — the ceiling is not binding"
+    )
+    assert any("Kelly ceiling" in n for n in tight.notes), (
+        f"a binding Kelly ceiling was not reported; notes were {tight.notes}"
+    )
+
+
+def test_kelly_without_a_calibrated_mu_falls_back_loudly():
+    """No expected return means no ceiling — and the book has to say so.
+
+    Silently sizing as though a ceiling had been applied is the failure mode this whole
+    pass exists to remove, so the absence of calibration is a reported note, never an
+    assumed zero. A zero `mu` would imply a ceiling of zero and delete the book.
+    """
+    rng = np.random.default_rng(12)
+    tickers = [f"K{i:02d}" for i in range(30)]
+    scores = pd.Series(rng.normal(0, 1, 30), index=tickers)
+    vol = pd.Series(np.abs(rng.normal(0.35, 0.05, 30)) + 0.10, index=tickers)
+
+    cfg = load_config("us", set_values=["portfolio.sizing=kelly"])
+    book = PortfolioConstructor.from_config(cfg).build(
+        scores, decision_session=SESSIONS[0], entry_session=SESSIONS[1],
+        volatility=vol,
+    )
+    assert book.positions, "the fallback emptied the book instead of sizing it"
+    assert any("NO Kelly ceiling" in n for n in book.notes), (
+        f"an uncalibrated Kelly book did not announce the fallback; notes were {book.notes}"
+    )
+
+
+def test_a_name_without_a_calibrated_mu_is_left_uncapped_not_deleted():
+    """A missing estimate declines to cap. It is not evidence that the edge is zero."""
+    fraction = 0.10
+    rng = np.random.default_rng(13)
+    tickers = [f"K{i:02d}" for i in range(30)]
+    scores = pd.Series(rng.normal(0, 1, 30), index=tickers)
+    vol = pd.Series(np.full(30, 0.35), index=tickers)
+    expected = scores * 0.01
+    # The three strongest longs lose their estimate. They are the names most likely to be
+    # deleted by a `fillna(0.0)`, which is exactly what used to happen.
+    missing = list(scores.sort_values(ascending=False).index[:3])
+    expected.loc[missing] = np.nan
+
+    cfg = load_config(
+        "us",
+        set_values=[
+            "portfolio.sizing=kelly",
+            f"portfolio.kelly_fraction={fraction}",
+            "portfolio.max_weight=0.90",
+            "portfolio.max_sector_weight=1.0",
+            "portfolio.max_net_exposure=1.0",
+        ],
+    )
+    book = PortfolioConstructor.from_config(cfg).build(
+        scores, decision_session=SESSIONS[0], entry_session=SESSIONS[1],
+        volatility=vol, expected_returns=expected,
+    )
+    held = {p.ticker for p in book.positions}
+    assert held & set(missing), (
+        "names with no calibrated expected return were dropped from the book; a missing "
+        "mu must leave a position uncapped, not zero it"
+    )
+    assert any("uncapped" in n for n in book.notes), book.notes

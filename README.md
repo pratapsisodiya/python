@@ -400,9 +400,35 @@ and most of this codebase — is checking honestly whether that list means anyth
 - **Honest about small sample sizes.** A few hundred weeks of history isn't a lot of data,
   statistically, and the report's confidence intervals and significance numbers reflect
   that rather than overstating certainty.
+- **Honest about *choosing*, too.** Run `swingbot backtest --pbo` and the report adds a
+  "probability of backtest overfitting" number. It re-runs the history many different
+  ways, and on each one picks whichever model setup looked best, then checks where that
+  choice actually landed. Above 0.50 means picking the best-looking setup is worse than
+  picking at random — a genuinely common outcome, and one most backtests never check for.
+- **Every setting has to prove it does something.** A separate test takes each setting in
+  the config file, runs the pipeline twice with two different values, and fails the build
+  if the output is identical. A setting that quietly does nothing is worse than no setting,
+  because you'll believe you're protected by it. This test found three controls that were
+  documented, configurable, and completely inert.
 
 None of this guarantees profit. It's the difference between a system that can tell you
 "this doesn't work, don't trade it" and one that will always say yes.
+
+### Explaining a trade after the fact
+
+Every `swingbot signal` run saves the exact model that produced it into its run folder,
+alongside the settings and the data fingerprints. Months later you can re-run that same
+week with the same model instead of a freshly fitted one:
+
+```bash
+swingbot signal --market us --use-model 20260904T163000-us-signal-3f2a1b8c
+```
+
+That reproduces the original book exactly rather than approximately, which is the
+difference between explaining a past trade and guessing at it. The command refuses if the
+saved model's features no longer match the current ones, or if the model is older than
+`model.max_model_age_weeks` — reproducing an old decision is fine, but trading this week
+on a year-old fit should have to be asked for out loud.
 
 ### Expectations, honestly
 

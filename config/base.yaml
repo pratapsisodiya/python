@@ -79,6 +79,10 @@ model:
   ridge:
     alpha: 10.0
   recency_half_life_weeks: 104
+  # `signal --use-model <run_id>` refuses a model whose training window ended more than
+  # this many weeks before the decision date. Pinning exists to reproduce a past decision
+  # and to explain a past trade, not to keep trading on a fit that has gone stale.
+  max_model_age_weeks: 8
 
 portfolio:
   n_long: 8

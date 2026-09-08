@@ -32,6 +32,7 @@ import pandas as pd
 from ..calendars import TradingCalendar, WeeklyDecision
 from ..config import Config
 from ..features.labels import forward_return_matrix
+from ..model.calibrate import attach_expected_returns
 from ..portfolio.construct import PortfolioConstructor
 from ..portfolio.risk import RiskState, update_kill_switch
 from ..types import DECISION_SESSION, LABEL, SECTOR, TICKER
@@ -51,11 +52,19 @@ def walk_forward_predict(
     label_column: str = LABEL,
     weight_column: str | None = "sample_weight",
     verbose: bool = False,
+    calibrate: bool = True,
 ) -> pd.DataFrame:
     """Fit on purged training rows, predict the test fold, repeat.
 
     Returns only the test-fold rows, each carrying an out-of-sample prediction. A week
     never appears twice, and no week's prediction comes from a model that saw it.
+
+    With ``calibrate`` on, an ``expected_return`` column is attached alongside the raw
+    prediction: fold *k*'s scores mapped through an isotonic fit on folds 0..*k-1*'s
+    out-of-sample results. That map is what turns a rank into a number in return units,
+    which is the only form the Kelly ceiling can use. Fold 0 carries NaN because nothing
+    precedes it, and sizing treats that as "no ceiling available" rather than as zero.
+    Turn it off for the null models, where a calibrated return is meaningless.
     """
     if panel.empty:
         return pd.DataFrame()
@@ -107,6 +116,9 @@ def walk_forward_predict(
         return pd.DataFrame()
 
     out = pd.concat(frames, ignore_index=True)
+    if calibrate:
+        # Attaching returns a copy, so ``attrs`` is set afterwards rather than before.
+        out = attach_expected_returns(out, label_column=label_column)
     out.attrs["folds"] = fold_log
     return out
 
@@ -162,10 +174,16 @@ class BacktestEngine:
             if decision is None or decision_session not in realised:
                 continue
 
-            scores = block.set_index(TICKER)["prediction"].astype(float)
+            indexed = block.set_index(TICKER)
+            scores = indexed["prediction"].astype(float)
+            expected_returns = (
+                indexed["expected_return"].astype(float)
+                if "expected_return" in indexed.columns
+                else None
+            )
             sectors = (
-                block.set_index(TICKER)[SECTOR]
-                if SECTOR in block.columns
+                indexed[SECTOR]
+                if SECTOR in indexed.columns
                 else pd.Series("Unknown", index=scores.index)
             )
 
@@ -197,6 +215,9 @@ class BacktestEngine:
                 previous_weights=previous.to_dict() if not previous.empty else None,
                 risk_scale=risk_state.scale,
                 eligible=eligible,
+                adv_notional=adv,
+                equity=equity * self.cfg.backtest.initial_equity,
+                expected_returns=expected_returns,
             )
 
             target = pd.Series(portfolio.weights, dtype=float)

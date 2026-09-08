@@ -145,6 +145,10 @@ class ModelConfig(_Base):
     gbdt: GBDTConfig = Field(default_factory=GBDTConfig)
     ridge: RidgeConfig = Field(default_factory=RidgeConfig)
     recency_half_life_weeks: float = 104.0
+    #: Refuse a pinned model whose training window ended more than this many weeks before
+    #: the decision date. A pinned model is for reproducing a past decision, not for
+    #: trading this week on a stale fit.
+    max_model_age_weeks: int = 8
 
 
 class PortfolioConfig(_Base):
