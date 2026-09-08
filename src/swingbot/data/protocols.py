@@ -61,6 +61,15 @@ class UniverseProvider(Protocol):
         """Terminal return booked when a name leaves the universe involuntarily."""
         ...
 
+    def lot_sizes(self) -> dict[str, int]:
+        """Tradeable increment per symbol, for symbols that declare one.
+
+        A symbol absent from the mapping has an *unknown* increment, which is not the
+        same as an increment of 1. Cash equity is fine at 1; a single-stock future is
+        not, and the order file marks it so nobody sends an unplaceable quantity.
+        """
+        ...
+
     def is_survivorship_biased(self) -> bool:
         """True when membership history is unavailable and results are inflated."""
         ...

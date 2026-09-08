@@ -117,6 +117,24 @@ PROBES: tuple[ConfigProbe, ...] = (
         note="Kelly ceiling: was fed cross-sectional ranks as if they were expected returns",
     ),
     ConfigProbe("portfolio.no_trade_band", (0.0, 0.25), observe="weights_prev"),
+    ConfigProbe(
+        "portfolio.min_position_notional",
+        (0.0, 50_000.0),
+        observe="orders",
+        note="minimum order worth sending: was in the config, read by nothing",
+    ),
+    ConfigProbe(
+        "market_profile.equity_lot_size",
+        (1, 200),
+        observe="orders",
+        note="tradeable increment: build_orders implemented it and no caller passed it",
+    ),
+    ConfigProbe(
+        "market_profile.derivative_lot_size",
+        (1, 500),
+        observe="orders_futures",
+        note="futures trade in lots; an unrounded quantity is not a placeable order",
+    ),
     # ------------------------------------------------------------------------ costs
     ConfigProbe("backtest.cost_scale", (0.0, 5.0), observe="costs"),
     ConfigProbe("costs.commission_bps", (0.0, 60.0), observe="costs"),
@@ -341,6 +359,54 @@ def _observe_weights_kelly(cfg: Config, bars) -> tuple:
     return _round(_fixture_book(cfg, with_prev=False, with_mu=True).weights)
 
 
+def _observe_orders(cfg: Config, bars, *, instrument: str = "equity") -> tuple:
+    """The order tickets, not the weights.
+
+    A separate observer because the weight observers are blind to this whole stage: lot
+    rounding and the minimum-order filter act when weights become share counts, so a knob
+    that only bites there looks dead to anything watching the book.
+    """
+    from swingbot.execution import build_orders
+    from swingbot.types import TargetPortfolio, TargetPosition
+
+    rng = np.random.default_rng(5)
+    tickers = [f"O{i:02d}" for i in range(12)]
+    weights = np.linspace(0.09, 0.02, 12) * rng.choice([1, -1], 12)
+    prices = {t: float(v) for t, v in zip(tickers, rng.uniform(20.0, 900.0, 12), strict=True)}
+
+    portfolio = TargetPortfolio(
+        decision_session=dt.date(2024, 3, 15),
+        entry_session=dt.date(2024, 3, 18),
+        positions=[
+            TargetPosition(
+                ticker=t,
+                weight=float(w),
+                # A short is expressed with the market's short instrument, which is what
+                # makes it a derivative on India and plain equity on the US.
+                instrument=instrument if w < 0 else "equity",
+            )
+            for t, w in zip(tickers, weights, strict=True)
+        ],
+    )
+
+    orders = build_orders(
+        portfolio,
+        prices,
+        equity=2_000_000.0,
+        lot_size=cfg.market_profile.equity_lot_size,
+        derivative_lot_size=cfg.market_profile.derivative_lot_size,
+        min_order_value=cfg.portfolio.min_position_notional,
+    )
+    return tuple(
+        (o.ticker, o.side.value, round(o.quantity, 6), o.instrument, o.tag) for o in orders
+    )
+
+
+def _observe_orders_futures(cfg: Config, bars) -> tuple:
+    """Same, with shorts expressed as futures, so the derivative lot can bind."""
+    return _observe_orders(cfg, bars, instrument="futures")
+
+
 def _observe_costs(cfg: Config, bars) -> tuple:
     model = CostModel.from_config(cfg)
     out = []
@@ -464,6 +530,8 @@ OBSERVERS = {
     "weights": _observe_weights,
     "weights_prev": _observe_weights_prev,
     "weights_kelly": _observe_weights_kelly,
+    "orders": _observe_orders,
+    "orders_futures": _observe_orders_futures,
     "costs": _observe_costs,
     "risk_scale": _observe_risk_scale,
     "panel": _observe_panel,
@@ -520,6 +588,13 @@ def test_every_config_leaf_is_probed_or_exempt():
     all_leaves = set(leaves(cfg))
 
     # Structural or informational settings that are not behavioural knobs.
+    #
+    # This list is the soft spot in the whole suite, and it has already been caught out
+    # once. `portfolio.min_position_notional` sat here for weeks looking structural, and
+    # it was simply dead — accepted by `build_orders` as `min_order_value`, implemented
+    # correctly, and passed by nobody. A knob only belongs here when it *cannot* alter a
+    # decision (a path, a label, a display string), never merely because writing a probe
+    # for it looked awkward.
     structural = {
         "market", "market_profile.name", "market_profile.display_name",
         "market_profile.currency", "market_profile.timezone",
@@ -538,7 +613,7 @@ def test_every_config_leaf_is_probed_or_exempt():
         "model.blend.price_weight", "model.blend.news_weight",
         "model.gbdt.min_child_samples", "model.gbdt.subsample",
         "model.gbdt.colsample_bytree", "model.gbdt.reg_lambda",
-        "portfolio.min_position_notional", "risk.cooldown_weeks",
+        "risk.cooldown_weeks",
         "costs.min_commission", "costs.futures_commission_bps",
         "costs.futures_stt_sell_bps", "costs.futures_exchange_bps",
         "costs.futures_stamp_duty_bps", "costs.futures_roll_bps",

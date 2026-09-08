@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pandas as pd
 
@@ -103,8 +103,8 @@ class YahooProvider:
 
     def _fetch_one(self, client, ticker: str, start: date, end: date) -> pd.DataFrame:
         params = {
-            "period1": int(datetime.combine(start, datetime.min.time(), timezone.utc).timestamp()),
-            "period2": int(datetime.combine(end, datetime.max.time(), timezone.utc).timestamp()),
+            "period1": int(datetime.combine(start, datetime.min.time(), UTC).timestamp()),
+            "period2": int(datetime.combine(end, datetime.max.time(), UTC).timestamp()),
             "interval": "1d",
             "events": "div,split",
             "includeAdjustedClose": "true",
@@ -136,7 +136,7 @@ class YahooProvider:
             return pd.DataFrame()
 
         sessions = [
-            datetime.fromtimestamp(int(ts), timezone.utc).date() for ts in stamps
+            datetime.fromtimestamp(int(ts), UTC).date() for ts in stamps
         ]
         frame = pd.DataFrame(
             {
@@ -158,7 +158,7 @@ class YahooProvider:
 
         session_pos = {s: i for i, s in enumerate(frame[SESSION].tolist())}
         for raw in (events.get("splits") or {}).values():
-            session = datetime.fromtimestamp(int(raw["date"]), timezone.utc).date()
+            session = datetime.fromtimestamp(int(raw["date"]), UTC).date()
             idx = session_pos.get(session)
             if idx is not None:
                 denom = float(raw.get("denominator") or 1.0)
@@ -166,7 +166,7 @@ class YahooProvider:
                 if denom:
                     frame.iat[idx, frame.columns.get_loc(SPLIT_FACTOR)] = numer / denom
         for raw in (events.get("dividends") or {}).values():
-            session = datetime.fromtimestamp(int(raw["date"]), timezone.utc).date()
+            session = datetime.fromtimestamp(int(raw["date"]), UTC).date()
             idx = session_pos.get(session)
             if idx is not None:
                 frame.iat[idx, frame.columns.get_loc(DIV_CASH)] = float(raw.get("amount") or 0.0)

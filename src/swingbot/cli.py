@@ -130,6 +130,26 @@ def doctor(
     else:
         console.print(f"\n[yellow]data not ready:[/yellow] {r.data_error}")
 
+    if r.shorting:
+        console.print()
+        if not r.shorting.get("available"):
+            console.print(f"[yellow]shorting[/yellow] {r.shorting.get('reason', '')}")
+        else:
+            n_ok = r.shorting.get("n_tradeable", 0)
+            style = "red" if n_ok == 0 else "yellow" if n_ok < 7 else "green"
+            console.print(f"[bold]shorting[/bold] [{style}]{r.shorting['verdict']}[/{style}]")
+            if r.shorting.get("n_no_futures"):
+                console.print(
+                    f"   {r.shorting['n_no_futures']} universe name(s) have no futures "
+                    "contract at all and are long-only regardless of the model"
+                )
+            blocked = r.shorting.get("blocked") or []
+            if blocked:
+                _frame(
+                    "cheapest lots — the equity each one needs",
+                    pd.DataFrame(blocked[:8]),
+                )
+
     if r.news_cache:
         console.print(
             f"\n[bold]news cache[/bold] {r.news_cache['entries']} entr(ies), "
@@ -173,6 +193,47 @@ def demo(
             f"[green]analysed[/green] {outcome.n_analysed} article(s) with {outcome.backend}"
         )
     console.print(f"\nnext: [cyan]swingbot backtest --market {market} --ablation[/cyan]")
+
+
+@app.command("instruments")
+def instruments(
+    market: MarketOpt = "india",
+    profile: ProfileOpt = None,
+    set_values: SetOpt = None,
+) -> None:
+    """Refresh the NSE instrument snapshot: ISINs, F&O lot sizes, freeze limits.
+
+    Only meaningful for India. A single-stock future trades in an exchange-defined lot
+    that differs per underlying and is revised periodically, so the snapshot is dated and
+    refreshed on purpose rather than silently picked up — a backtest has to be able to
+    reproduce against the lots that were in force.
+    """
+    cfg = _setup(market, profile, set_values)
+    if cfg.market_profile.name != "india":
+        console.print(
+            f"[yellow]instrument snapshots are an NSE concept; {cfg.market_profile.name} "
+            "trades cash equity in single shares[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    from .data import load_universe, refresh_snapshot
+
+    universe = load_universe(cfg)
+    tickers = universe.all_tickers()
+    try:
+        path, n, with_lots = refresh_snapshot(tickers=tickers)
+    except Exception as exc:
+        raise _fail(exc) from None
+
+    console.print(f"[green]wrote {n} instrument(s)[/green] {path}")
+    console.print(
+        f"{with_lots} carry an F&O lot size and can therefore be shorted weekly; "
+        f"{n - with_lots} have no futures contract and are long-only whatever the model thinks"
+    )
+    console.print(
+        "[dim]next: copy the lot_size column into your universe file, or re-run "
+        "`swingbot doctor --market india` to see the capital needed to short[/dim]"
+    )
 
 
 @app.command("fetch")

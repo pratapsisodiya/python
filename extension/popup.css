@@ -19,6 +19,7 @@
   --err-line: #dd9a93;
   --err-fg: #8a2418;
   --done: #8b919c;
+  --line-strong: #c6ccd6;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -38,6 +39,7 @@
     --err-line: #7d3a30;
     --err-fg: #f3b6ac;
     --done: #68707d;
+    --line-strong: #3a4553;
   }
 }
 
@@ -130,6 +132,75 @@ button.primary:hover { filter: brightness(1.08); }
 }
 .pill.complete { color: var(--accent); border-color: var(--accent); }
 
+/* ---------------------------------------------------------------- running exposure */
+
+.running {
+  margin: 6px 12px 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-sunken);
+}
+.running-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.running-grid > div { display: flex; flex-direction: column; }
+.running-grid .k {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+}
+.running-grid .v { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.running-grid .v.pos { color: var(--buy); }
+.running-grid .v.neg { color: var(--sell); }
+.running-note { margin-top: 5px; font-size: 11px; color: var(--fg-dim); }
+.running-note.alert { color: var(--warn-fg); font-weight: 600; }
+@media (prefers-color-scheme: dark) { .running-note.alert { color: var(--warn-line); } }
+
+/* ------------------------------------------------------------------ sequence + fills */
+
+.col-seq { width: 20px; text-align: right; }
+td.seq {
+  text-align: right;
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+tr.step-boundary td { border-top: 2px solid var(--line-strong); }
+
+.step-label {
+  /* No `display: block` here. On a <td> it overrides `display: table-cell`, the colspan
+     stops applying, and the label wraps into a one-word-wide column. */
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+  padding: 5px 5px 2px;
+}
+
+.fill-input {
+  width: 5.5em;
+  font: inherit;
+  font-size: 11px;
+  color: var(--fg);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 4px;
+  text-align: right;
+}
+.fill-input:focus { border-color: var(--accent); outline: none; }
+.slip { display: block; font-size: 10px; font-variant-numeric: tabular-nums; }
+.slip.pos { color: var(--sell); }
+.slip.neg { color: var(--buy); }
+
+.quality-rows { max-height: 130px; overflow: auto; font-size: 11px; }
+.quality-rows div { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0; }
+.quality-rows .bad { color: var(--sell); }
+
 .banner {
   margin: 8px 12px;
   padding: 9px 11px;
@@ -200,9 +271,9 @@ input[type="checkbox"] { cursor: pointer; margin: 0; }
 .empty { padding: 18px 4px; text-align: center; color: var(--fg-dim); }
 .empty code { font-size: 11.5px; }
 
-details#paste-panel { margin-top: 12px; font-size: 12px; }
-details#paste-panel summary { cursor: pointer; color: var(--fg-dim); }
-details#paste-panel[open] summary { margin-bottom: 6px; color: var(--fg); }
+details { margin-top: 12px; font-size: 12px; }
+details summary { cursor: pointer; color: var(--fg-dim); }
+details[open] summary { margin-bottom: 6px; color: var(--fg); }
 .hint { margin: 4px 0 6px; color: var(--fg-dim); font-size: 11.5px; }
 
 textarea {

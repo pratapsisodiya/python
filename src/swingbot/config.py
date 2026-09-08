@@ -290,6 +290,22 @@ class MarketProfile(_Base):
     allow_short: bool = True
     short_instrument: ShortInstrument = ShortInstrument.CASH_EQUITY
 
+    #: Tradeable increment for cash equity. 1 nearly everywhere; some venues quote in
+    #: board lots, and a broker that rejects odd lots turns a whole week's book into
+    #: rejections.
+    equity_lot_size: int = 1
+
+    #: Tradeable increment for the short instrument when it is not cash equity.
+    #:
+    #: This one is not cosmetic. A single-stock future trades in exchange-defined lots,
+    #: so "sell 173" of an NSE future is not an order anyone can place — it has to be a
+    #: whole number of lots. Lot sizes differ per underlying and the exchange revises
+    #: them, so a single number here is an approximation; it is set to the smallest
+    #: common value so the rounding always errs *small*, and the order file states the
+    #: assumption rather than hiding it. Anyone trading real size should replace this
+    #: with the current per-symbol lot table from the exchange.
+    derivative_lot_size: int = 1
+
     @field_validator("short_instrument", mode="before")
     @classmethod
     def _none_means_no_shorting(cls, v):

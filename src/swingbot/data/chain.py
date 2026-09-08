@@ -38,6 +38,7 @@ from ..types import (
 )
 from .prices_csv import CSVProvider
 from .prices_stooq import StooqProvider
+from .prices_upstox import UpstoxProvider
 from .prices_yahoo import YahooProvider
 from .synthetic import SyntheticProvider
 
@@ -82,6 +83,10 @@ class ProviderChain:
                         symbol_suffix=cfg.market_profile.symbol_suffix,
                         close_hour_utc=close_hour,
                     )
+                )
+            elif key == "upstox":
+                built.append(
+                    UpstoxProvider(close_hour_utc=close_hour)
                 )
             elif key == "stooq":
                 built.append(

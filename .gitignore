@@ -28,3 +28,7 @@ htmlcov/
 *.sqlite-shm
 *.duckdb
 !tests/fixtures/**/*.parquet
+
+# Scratch data directories from side-by-side fetches. The real cache is /data/.
+/data-real/
+/data-india-real/

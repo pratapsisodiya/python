@@ -14,6 +14,18 @@ market_profile:
   benchmark: "^NSEI"
   allow_short: true
   short_instrument: futures
+  # Cash-segment equity trades in single shares.
+  equity_lot_size: 1
+  # Single-stock futures trade in exchange-defined lots, and the lot differs per
+  # underlying — RELIANCE and a mid-cap are nowhere near the same size, and NSE revises
+  # them. So this stays 1, meaning "not known here", and the per-symbol `lot_size`
+  # column in the universe file is the place to put real numbers.
+  #
+  # 1 does not mean "one share is fine". It means the quantity has not been rounded to
+  # anything placeable, and every such order is tagged `lot-unknown` so the ticket says
+  # to check it. Guessing a single number would be worse: rounding a 250-lot symbol up
+  # to a 500 lot doubles the intended exposure.
+  derivative_lot_size: 1
 
 universe:
   file: config/universe/nifty200.csv

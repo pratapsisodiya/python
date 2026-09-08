@@ -40,9 +40,9 @@ RUN_ID = f"{DECISION:%Y%m%d}T163000-us-signal-abcdef12"
 # --------------------------------------------------------------------------------------
 
 
-ORDERS_CSV = """ticker,side,quantity,order_type,instrument,limit_price,est_price,est_value,client_order_id
-AAA,buy,12,market,equity,,100.0,1200.0,20260908-AAA
-BBB,sell,8,market,futures,,50.0,400.0,20260908-BBB
+ORDERS_CSV = """ticker,side,quantity,order_type,instrument,limit_price,est_price,est_value,client_order_id,tag,expected_slip_bps
+AAA,buy,12,market,equity,,100.0,1200.0,20260908-AAA,us-weekly,6.0
+BBB,sell,8,market,futures,,50.0,400.0,20260908-BBB,us-weekly lot-unknown,7.5
 """
 
 
@@ -169,7 +169,11 @@ def test_the_only_write_route_is_the_placed_checklist(client):
         for route in client.app.routes
         if getattr(route, "methods", None) and route.methods & {"POST", "PUT", "PATCH", "DELETE"}
     })
-    assert writes == ["/api/jobs", "/api/orders/{run_id}/placed"], writes
+    assert writes == [
+        "/api/jobs",                        # starts a pipeline command
+        "/api/orders/{run_id}/fills",       # what a trade actually filled at
+        "/api/orders/{run_id}/placed",      # the tick list
+    ], writes
 
 
 # --------------------------------------------------------------------------------------
@@ -287,8 +291,65 @@ def test_the_placed_checklist_round_trips_to_the_run_directory(client, runs_dir)
     # with itself about how many orders are outstanding.
     assert saved["placed"] == ["20260908-AAA", "20260908-BBB"]
 
-    assert (runs_dir / RUN_ID / "placed.json").exists()
+    assert (runs_dir / RUN_ID / "execution.json").exists()
     assert client.get("/api/orders/latest?market=us").json()["placed"] == saved["placed"]
+
+
+def test_a_fill_price_survives_unticking_the_row(client):
+    """A tick is a checklist state; a price is a fact about the past.
+
+    Unticking a row means "I have not placed this after all", not "the price I wrote down
+    was wrong". Losing the fill on a mis-click would destroy the only record of what the
+    trade actually cost, which is the whole reason for capturing it.
+    """
+    client.post(
+        f"/api/orders/{RUN_ID}/fills",
+        json={"fills": [{"client_order_id": "20260908-AAA", "price": 101.25, "placed": True}]},
+    )
+    client.post(f"/api/orders/{RUN_ID}/placed", json={"placed": []})
+
+    record = client.get(f"/api/orders/{RUN_ID}/placed").json()
+    assert record["placed"] == []
+    assert record["orders"]["20260908-AAA"]["price"] == pytest.approx(101.25)
+
+
+def test_slippage_compares_fills_against_the_model(client):
+    """The loop the rest of the system was missing, checked end to end.
+
+    The fixture's order carries `expected_slip_bps`, so the report can say not just what
+    the fill cost but whether the backtest's cost assumption is holding — which is the
+    only question a cost sweep cannot answer.
+    """
+    # AAA reference is 100.0; filling a buy at 101.0 gives up exactly 100 bps.
+    client.post(
+        f"/api/orders/{RUN_ID}/fills",
+        json={"fills": [{"client_order_id": "20260908-AAA", "price": 101.0}]},
+    )
+    report = client.get(f"/api/orders/{RUN_ID}/slippage").json()
+
+    assert report["n_filled"] == 1
+    assert report["weighted_slippage_bps"] == pytest.approx(100.0, abs=0.5)
+    assert report["weighted_expected_bps"] == pytest.approx(6.0)
+    assert report["surprise_bps"] == pytest.approx(94.0, abs=0.5)
+    # One fill is not evidence, and the verdict has to say so rather than extrapolate.
+    assert "too few" in report["verdict"]
+
+
+def test_slippage_refuses_an_implausible_fill(client):
+    """A mistyped digit must be named, not averaged into the result.
+
+    Twenty percent from the reference on a weekly rebalance is a typo. Letting one
+    through would move the book-level number enough to make the whole report useless,
+    and the user would have no idea why.
+    """
+    client.post(
+        f"/api/orders/{RUN_ID}/fills",
+        json={"fills": [{"client_order_id": "20260908-AAA", "price": 1000.0}]},
+    )
+    report = client.get(f"/api/orders/{RUN_ID}/slippage").json()
+
+    assert report["n_filled"] == 0
+    assert any("typo" in line for line in report["dropped"])
 
 
 def test_the_checklist_refuses_an_unknown_run(client):

@@ -85,6 +85,24 @@ class PlacedRequest(BaseModel):
     placed: list[str] = Field(default_factory=list)
 
 
+class FillRequest(BaseModel):
+    """What one order actually filled at.
+
+    ``price`` is the price on the ticket, not including commission or taxes — those are
+    charged separately and never appear in it, which is exactly why the slippage
+    comparison is against the model's spread-and-impact component alone.
+    """
+
+    client_order_id: str
+    placed: bool = True
+    price: float | None = None
+    quantity: float | None = None
+
+
+class FillsRequest(BaseModel):
+    fills: list[FillRequest] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------------------
@@ -300,27 +318,68 @@ def build_app(
             notes=book.get("notes", []),
             caveats=book.get("caveats", []),
             placed=detail["placed"],
+            sequence=book.get("sequence", []),
+            execution=detail.get("execution", {}),
         )
 
     @app.get("/api/orders/{run_id}/placed")
     def get_placed(run_id: str) -> dict[str, Any]:
         directory = resolve_run(run_id)
-        stored = read_json(directory / "placed.json", {}) or {}
-        return {"run_id": run_id, "placed": list(stored.get("placed", []))}
+        record = read_execution_record(directory)
+        return {"run_id": run_id, "placed": placed_ids(record), "orders": record}
 
     @app.post("/api/orders/{run_id}/placed")
     def set_placed(run_id: str, body: PlacedRequest) -> dict[str, Any]:
         """Record which orders the user placed.
 
-        The only thing the dashboard writes outside a job's own run directory, and it is
-        bookkeeping about the past, not an instruction about the future: a note that you
-        keyed a trade in yourself. It is stored in the run directory so it survives the
-        server restarting and so next week's run has a record of what actually happened.
+        Bookkeeping about the past, not an instruction about the future: a note that you
+        keyed a trade in yourself. Stored in the run directory so it survives a server
+        restart and so next week has a record of what actually happened.
+
+        Ticks are replaced wholesale but any fill *price* already recorded is kept —
+        unticking a row is a correction to the checklist, not a statement that the price
+        you wrote down was wrong.
         """
         directory = resolve_run(run_id)
-        placed = sorted({str(item) for item in body.placed})
-        write_json(directory / "placed.json", {"run_id": run_id, "placed": placed})
-        return {"run_id": run_id, "placed": placed}
+        wanted = {str(item) for item in body.placed}
+        record = read_execution_record(directory)
+        for order_id in set(record) | wanted:
+            entry = record.setdefault(order_id, {})
+            entry["placed"] = order_id in wanted
+        write_execution_record(directory, run_id, record)
+        return {"run_id": run_id, "placed": placed_ids(record), "orders": record}
+
+    @app.post("/api/orders/{run_id}/fills")
+    def set_fills(run_id: str, body: FillsRequest) -> dict[str, Any]:
+        """Record what orders actually filled at, and return the slippage that implies.
+
+        This is the loop the rest of the system was missing. Every backtest charges a
+        modelled cost and sweeps it to show the strategy does not depend on the exact
+        figure — honest, but still an assumption. A fill price makes it measurable.
+        """
+        directory = resolve_run(run_id)
+        record = read_execution_record(directory)
+        for fill in body.fills:
+            entry = record.setdefault(fill.client_order_id, {})
+            entry["placed"] = fill.placed
+            if fill.price is not None:
+                entry["price"] = float(fill.price)
+                entry["at"] = _now()
+            if fill.quantity is not None:
+                entry["quantity"] = float(fill.quantity)
+        write_execution_record(directory, run_id, record)
+        return {"run_id": run_id, "placed": placed_ids(record), "orders": record}
+
+    @app.get("/api/orders/{run_id}/slippage")
+    def slippage(run_id: str) -> dict[str, Any]:
+        """What this week's fills cost, against what the cost model predicted."""
+        from ..tca import analyse_fills
+
+        directory = resolve_run(run_id)
+        detail = run_detail(directory)
+        report = analyse_fills(detail["orders"], read_execution_record(directory))
+        report.run_id = detail["run_id"]
+        return report.to_dict()
 
     # -------------------------------------------------------------------------------- jobs
 
@@ -419,6 +478,37 @@ def build_app(
         runner.close()
 
     return app
+
+
+def _now() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def read_execution_record(directory: Path) -> dict[str, dict[str, Any]]:
+    """What was placed and at what price, keyed by client order id.
+
+    ``placed.json`` is read as a fallback so runs written before fill capture existed
+    still show their tick list. Same reason the book falls back to ``targets.json``: a
+    run directory is a durable record, and a new field must not make an old one
+    unreadable.
+    """
+    record = read_json(directory / "execution.json", {}) or {}
+    orders = record.get("orders")
+    if isinstance(orders, dict):
+        return {str(k): dict(v) for k, v in orders.items() if isinstance(v, dict)}
+
+    legacy = read_json(directory / "placed.json", {}) or {}
+    return {str(order_id): {"placed": True} for order_id in legacy.get("placed", [])}
+
+
+def write_execution_record(directory: Path, run_id: str, record: dict[str, dict]) -> None:
+    write_json(directory / "execution.json", {"run_id": run_id, "orders": record})
+
+
+def placed_ids(record: dict[str, dict]) -> list[str]:
+    return sorted(k for k, v in record.items() if v.get("placed"))
 
 
 def _latest_signal_dir(runs_dir: Path | str, market: str) -> Path | None:

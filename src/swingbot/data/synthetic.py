@@ -25,7 +25,6 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
-from ..pit import UTC
 from ..types import (
     AVAILABLE_AT,
     CLOSE,

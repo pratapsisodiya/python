@@ -81,6 +81,19 @@ class UniverseFile:
             if "delisting_return" in raw.columns
             else pd.NA
         )
+        # Optional per-symbol tradeable increment.
+        #
+        # Needed because a single-stock future does not trade in shares: NSE defines a lot
+        # per underlying and revises it, so "sell 173" of a future is not an order anyone
+        # can place. A single market-wide number would be wrong for most names and could
+        # round a 250-lot symbol up to 500, doubling the intended exposure — worse than
+        # not rounding. So it is per symbol, optional, and absence is reported rather than
+        # guessed at.
+        frame["lot_size"] = (
+            pd.to_numeric(raw["lot_size"], errors="coerce")
+            if "lot_size" in raw.columns
+            else pd.NA
+        )
         return frame.drop_duplicates(subset=[TICKER], keep="first").reset_index(drop=True)
 
     # ------------------------------------------------------------------------ public
@@ -107,6 +120,20 @@ class UniverseFile:
 
     def sectors(self) -> dict[str, str]:
         return dict(zip(self._frame[TICKER], self._frame[SECTOR], strict=True))
+
+    def lot_sizes(self) -> dict[str, int]:
+        """Per-symbol tradeable increment, for the symbols that declare one.
+
+        Only symbols with a usable value appear. A caller must treat a missing entry as
+        "unknown", never as 1: for cash equity 1 is right, but for a derivative it means
+        the order has not been rounded to a placeable size and somebody has to check.
+        """
+        column = self._frame["lot_size"]
+        return {
+            str(ticker): int(value)
+            for ticker, value in zip(self._frame[TICKER], column, strict=True)
+            if pd.notna(value) and int(value) > 1
+        }
 
     def delisting_return(self, ticker: str) -> float | None:
         row = self._frame.loc[self._frame[TICKER] == ticker]
@@ -143,9 +170,15 @@ class StaticUniverse:
 
     name = "static"
 
-    def __init__(self, tickers: list[str], sectors: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        tickers: list[str],
+        sectors: dict[str, str] | None = None,
+        lot_sizes: dict[str, int] | None = None,
+    ) -> None:
         self.tickers = list(tickers)
         self._sectors = sectors or {}
+        self._lot_sizes = lot_sizes or {}
 
     def members_asof(self, asof: date) -> pd.DataFrame:  # noqa: ARG002
         return pd.DataFrame(
@@ -161,6 +194,9 @@ class StaticUniverse:
 
     def sectors(self) -> dict[str, str]:
         return dict(self._sectors)
+
+    def lot_sizes(self) -> dict[str, int]:
+        return dict(self._lot_sizes)
 
     def delisting_return(self, ticker: str) -> float | None:  # noqa: ARG002
         return None

@@ -88,6 +88,8 @@ def orders_payload(
     notes: list[str] | None = None,
     caveats: list[str] | None = None,
     placed: list[str] | None = None,
+    sequence: list[dict[str, Any]] | None = None,
+    execution: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The one order shape. Both the dashboard and the extension render from this."""
     return jsonable({
@@ -102,6 +104,11 @@ def orders_payload(
         "caveats": list(caveats or []),
         "orders": orders,
         "placed": list(placed or []),
+        # The order to work the tickets in, plus what has actually been done so far.
+        # Both surfaces render from these rather than from the file's own row order,
+        # which is sorted for tidiness and is close to the worst order to trade in.
+        "sequence": list(sequence or []),
+        "execution": dict(execution or {}),
     })
 
 
@@ -228,7 +235,19 @@ def run_detail(directory: Path) -> dict[str, Any]:
     # execution adapter's file and holds only the orders.
     detail["book"] = jsonable(read_json(directory / "book.json", {}) or {})
     detail["model_card"] = jsonable(read_json(directory / "model" / "model_card.json", {}) or {})
-    detail["placed"] = list((read_json(directory / "placed.json", {}) or {}).get("placed", []))
+    execution = read_json(directory / "execution.json", {}) or {}
+    orders_record = execution.get("orders")
+    if isinstance(orders_record, dict):
+        detail["execution"] = jsonable(orders_record)
+        detail["placed"] = sorted(
+            k for k, v in orders_record.items() if isinstance(v, dict) and v.get("placed")
+        )
+    else:
+        # Runs written before fill capture existed carry only a tick list.
+        detail["execution"] = {}
+        detail["placed"] = list(
+            (read_json(directory / "placed.json", {}) or {}).get("placed", [])
+        )
 
     detail["orders"] = _read_csv_rows(directory / "orders.csv")
     detail["ablation"] = _read_csv_rows(directory / "ablation.csv")

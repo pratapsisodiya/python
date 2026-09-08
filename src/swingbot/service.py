@@ -157,6 +157,8 @@ class DoctorReport:
     news_cache: dict[str, Any] = field(default_factory=dict)
     n_trial_configs: int = 0
     n_runs: int = 0
+    #: India only: what shorting via single-stock futures actually requires.
+    shorting: dict[str, Any] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------------------
@@ -368,7 +370,7 @@ def run_signal(
 ) -> SignalOutcome:
     """Produce this week's target book, diff it against holdings, write the order files."""
     from .backtest.engine import _return_history, _rolling_stats, _weekly_return_panel
-    from .execution import build_adapter, build_orders, orders_to_frame
+    from .execution import build_adapter, build_orders, execution_sequence, orders_to_frame
     from .features.pipeline import news_feature_columns, price_feature_columns
     from .io.runs import RunContext
     from .model import BlendedModel, build_model
@@ -510,10 +512,49 @@ def run_signal(
     )
 
     adapter.set_prices(last_close)
+
+    # Tradeable increments and the minimum order worth sending.
+    #
+    # Both of these were dead: `build_orders` accepted `lot_size` and `min_order_value`,
+    # implemented them correctly, and no caller ever passed either — while
+    # `portfolio.min_position_notional` sat in the config read by nothing. The visible
+    # consequence was an India order file asking to sell 173 of a single-stock future, a
+    # quantity no exchange will accept, because futures trade in lots.
+    profile = cfg.market_profile
+    lot_sizes = getattr(data.universe, "lot_sizes", lambda: {})()
+    sizing_notes: list[str] = []
     orders = build_orders(
         portfolio, last_close, account_equity, held_shares,
-        tag=f"{cfg.market_profile.name}-weekly",
+        lot_size=profile.equity_lot_size,
+        lot_sizes=lot_sizes,
+        derivative_lot_size=profile.derivative_lot_size,
+        min_order_value=cfg.portfolio.min_position_notional,
+        tag=f"{profile.name}-weekly",
+        notes=sizing_notes,
     )
+    # A position the account cannot express belongs on the book's own note list, next to
+    # the risk limits and the capacity truncations — it is the same kind of fact.
+    portfolio.notes.extend(sizing_notes)
+    # Can this account short at all?
+    #
+    # An indivisible lot and a per-name weight cap together set a hard floor on account
+    # size, and on NSE that floor is high: the cheapest F&O lot in the Nifty 200 is around
+    # 4.3 lakh of notional, so a 12 percent cap needs roughly 36 lakh of equity before a
+    # single short fits. Below that the model still ranks names and still asks for shorts,
+    # and every one of them is unplaceable. Saying so here is the difference between a
+    # surprising order file and a rejected order.
+    adequacy = _capital_adequacy_note(cfg, portfolio, last_close, account_equity)
+    if adequacy:
+        portfolio.notes.append(adequacy)
+
+    if any("lot-unknown" in order.tag for order in orders):
+        portfolio.notes.append(
+            f"{sum('lot-unknown' in o.tag for o in orders)} order(s) are for an "
+            "instrument that trades in exchange-defined lots and no lot size is "
+            "declared, so the quantity is NOT rounded to a placeable size. Confirm the "
+            "lot with your broker and round down, or fill in the lot_size column in "
+            f"{cfg.universe.file}."
+        )
     meta = RunMeta(
         run_id=run.run_id, market=cfg.market_profile.name,
         decision_session=decision.decision_session, entry_session=decision.entry_session,
@@ -523,6 +564,10 @@ def run_signal(
     )
     execution = adapter.submit(orders, meta)
     orders_frame = orders_to_frame(orders, last_close)
+    orders_frame = _attach_expected_slippage(
+        orders_frame, cfg, adv_notional=stats.get("adv_notional"),
+        volatility=stats.get("volatility"), high_low_range=stats.get("hl_range"),
+    )
 
     # The target book, written alongside the orders.
     #
@@ -536,6 +581,13 @@ def run_signal(
     # Written by the service rather than by the adapter, because the adapter's contract is
     # deliberately about orders and nothing else — that is the seam a broker would attach
     # to, and widening it to carry research metadata would be the wrong trade.
+    # Rewrite orders.csv with the expectation column the adapter's own frame lacks.
+    # The adapter's contract is orders and nothing else — widening it to carry research
+    # metadata would be the wrong trade — so the service adds the column afterwards.
+    orders_path = Path(execution.artifacts.get("orders_csv", "")) if execution.artifacts else None
+    if orders_path and orders_path.exists():
+        orders_frame.to_csv(orders_path, index=False)
+
     book = weights_to_frame(portfolio)
     run.write_json(
         {
@@ -555,6 +607,11 @@ def run_signal(
             "calibration": calibration,
             "pinned_model": use_model or "",
             "positions": book.to_dict("records"),
+            # The order to work the tickets in, decided here rather than in a front end.
+            # The web layer is not allowed to import the execution package — that is what
+            # keeps the dashboard unable to place a trade — so anything derived from the
+            # order set has to be computed at signal time and written down.
+            "sequence": execution_sequence(orders, last_close),
         },
         "book.json",
     )
@@ -828,6 +885,17 @@ def doctor_report(cfg: Config) -> DoctorReport:
     except Exception as exc:
         report.data_error = str(exc)
 
+    # What shorting costs in capital, not in basis points.
+    #
+    # This belongs in `doctor` because it is a fact about the account, not about a
+    # particular week: on NSE a weekly short must be a single-stock future, futures trade
+    # in indivisible exchange-set lots, and one lot of the cheapest Nifty 200 name is
+    # several lakh. Under a per-name weight cap that sets a floor on equity below which
+    # the short sleeve cannot exist. Better to learn it from `doctor` than from a rejected
+    # order on a Monday morning.
+    if cfg.market_profile.short_instrument.value == "futures" and report.data_ready:
+        report.shorting = _shorting_requirements(cfg)
+
     cache_path = cfg.market_dir / "news_cache.sqlite"
     if cache_path.exists():
         from .io.cache import ContentCache
@@ -848,6 +916,126 @@ def doctor_report(cfg: Config) -> DoctorReport:
 # --------------------------------------------------------------------------------------
 # Small shared helpers
 # --------------------------------------------------------------------------------------
+
+
+def _shorting_requirements(cfg: Config) -> dict[str, Any]:
+    """Minimum equity at which the futures short sleeve becomes reachable."""
+    from .data import NSEInstruments, capital_adequacy
+    from .pipeline import load_bars
+
+    instruments = NSEInstruments.load_if_present()
+    if instruments is None:
+        return {
+            "available": False,
+            "reason": (
+                "no NSE instrument snapshot; run `swingbot instruments --market india` "
+                "to find out what shorting requires"
+            ),
+        }
+
+    try:
+        bars, _ = load_bars(cfg)
+    except Exception as exc:
+        return {"available": False, "reason": str(exc)}
+
+    latest = bars[bars["session"] == bars["session"].max()]
+    prices = dict(zip(latest["ticker"], latest["close"], strict=True))
+
+    report = capital_adequacy(
+        instruments, prices,
+        equity=cfg.backtest.initial_equity,
+        max_weight=cfg.portfolio.max_weight,
+    )
+    payload = report.to_dict()
+    payload["available"] = True
+    payload["n_no_futures"] = len(instruments) - len(instruments.lot_sizes())
+    return payload
+
+
+def _capital_adequacy_note(
+    cfg: Config, portfolio, prices: dict[str, float], equity: float
+) -> str:
+    """One sentence on whether the short sleeve is reachable at this account size.
+
+    Only applies where shorts are expressed as a derivative — on US cash equity a short is
+    just a share count and no lot exists to be indivisible.
+    """
+    from .data import NSEInstruments, capital_adequacy
+
+    if cfg.market_profile.short_instrument.value != "futures":
+        return ""
+    shorts = [p.ticker for p in portfolio.positions if p.weight < 0]
+    if not shorts or equity <= 0:
+        return ""
+
+    instruments = NSEInstruments.load_if_present()
+    if instruments is None:
+        return ""
+
+    report = capital_adequacy(
+        instruments, prices,
+        equity=equity, max_weight=cfg.portfolio.max_weight, tickers=shorts,
+    )
+    return report.verdict() if report.blocked else ""
+
+
+def _attach_expected_slippage(
+    orders: pd.DataFrame,
+    cfg: Config,
+    *,
+    adv_notional: pd.Series | None = None,
+    volatility: pd.Series | None = None,
+    high_low_range: pd.Series | None = None,
+) -> pd.DataFrame:
+    """Record what the cost model expects each fill to give up, in basis points.
+
+    Stored on the order rather than recomputed later, and for one reason: it has to be
+    the expectation made *before* the fill. Recomputing it afterwards from whatever data
+    is on hand would let today's knowledge into yesterday's forecast, which is the same
+    mistake the whole point-in-time layer exists to prevent — just moved from the signal
+    to the post-trade report.
+
+    Only the spread and impact components go in. Commission, STT and stamp duty are
+    charged separately and never appear in the price on the ticket, so including them
+    would flatter the model when the comparison is made against a fill price.
+    """
+    from .backtest.costs import CostModel
+
+    if orders.empty:
+        return orders
+
+    model = CostModel.from_config(cfg)
+    shorts_are_derivatives = cfg.market_profile.short_instrument.value != "cash_equity"
+
+    def expected(row) -> float | None:
+        notional = float(row.get("est_value") or 0.0)
+        if notional <= 0:
+            return None
+        ticker = row["ticker"]
+        breakdown = model.trade_cost(
+            notional=notional,
+            is_buy=row["side"] == "buy",
+            is_short_leg=(
+                row["instrument"] != "equity"
+                if shorts_are_derivatives
+                else row["instrument"] == "equity_short"
+            ),
+            volatility_annual=_lookup(volatility, ticker, 0.30),
+            adv_notional=_lookup(adv_notional, ticker, None),
+            high_low_range=_lookup(high_low_range, ticker, None),
+        )
+        return round((breakdown.spread + breakdown.impact) / notional * 10_000.0, 4)
+
+    out = orders.copy()
+    out["expected_slip_bps"] = [expected(row) for _, row in out.iterrows()]
+    return out
+
+
+def _lookup(series: pd.Series | None, key: str, default):
+    if series is None or key not in series.index:
+        return default
+    value = series.get(key)
+    return default if value is None or pd.isna(value) else float(value)
 
 
 def _as_date(value: str | date | None) -> date | None:

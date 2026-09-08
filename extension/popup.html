@@ -31,11 +31,29 @@
     <div class="meta-sub" id="meta-run"></div>
   </section>
 
+  <!-- Where the book stands right now, part-way through working the list. Placing 8 of
+       14 orders leaves an exposure the model never chose, and this is the only place
+       anyone would find that out. -->
+  <section id="running" class="running" hidden>
+    <div class="running-grid">
+      <div><span class="k">Long</span><span class="v" id="run-long">—</span></div>
+      <div><span class="k">Short</span><span class="v" id="run-short">—</span></div>
+      <div><span class="k">Net</span><span class="v" id="run-net">—</span></div>
+      <div><span class="k">Cash</span><span class="v" id="run-cash">—</span></div>
+    </div>
+    <div class="running-note" id="run-note"></div>
+  </section>
+
   <div id="futures-warning" class="banner warn" hidden>
     <strong>Short positions here are futures, not equity.</strong>
     Rows marked <code>futures</code> must be placed on the <b>F&amp;O segment</b>, not equity
     delivery — NSE delivery cannot be held short overnight. Placing one of these as a normal
     sell will either be rejected or sell stock you do not own.
+  </div>
+
+  <div id="lot-warning" class="banner warn" hidden>
+    <strong>Quantities not rounded to a lot.</strong>
+    <span id="lot-warning-text"></span>
   </div>
 
   <div id="notes" class="notes" hidden></div>
@@ -45,10 +63,11 @@
       <thead>
         <tr>
           <th class="col-done" aria-label="Placed"></th>
+          <th class="col-seq" title="Work the list in this order">#</th>
           <th>Ticker</th>
           <th>Side</th>
           <th class="num">Qty</th>
-          <th class="num">Est. value</th>
+          <th class="num">Value</th>
           <th class="col-copy" aria-label="Copy"></th>
         </tr>
       </thead>
@@ -56,6 +75,12 @@
     </table>
 
     <div id="empty" class="empty" hidden></div>
+
+    <details id="quality-panel" hidden>
+      <summary>Execution quality <span id="quality-badge" class="pill"></span></summary>
+      <p class="hint" id="quality-verdict"></p>
+      <div id="quality-rows" class="quality-rows"></div>
+    </details>
 
     <details id="paste-panel">
       <summary>Dashboard not running? Paste <code>orders.csv</code> instead</summary>
@@ -70,8 +95,8 @@
   </main>
 
   <footer>
-    <span id="footer-note">This helper never signs in to your broker and never places a trade.</span>
-    <a id="open-dashboard" href="#" target="_blank" rel="noreferrer">Open dashboard</a>
+    <span id="footer-note">Never signs in to your broker. Never places a trade.</span>
+    <a id="open-dashboard" href="#" target="_blank" rel="noreferrer">Dashboard</a>
   </footer>
 
   <div id="toast" class="toast" hidden></div>

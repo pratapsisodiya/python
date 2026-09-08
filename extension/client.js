@@ -96,6 +96,27 @@ async function pushPlaced({ baseUrl, runId, placed }) {
   }
 }
 
+/**
+ * Record what an order actually filled at.
+ *
+ * Unlike a tick, this one is worth telling the user about when it fails: a fill price is
+ * a fact about the past that nothing else can reconstruct, and the whole point of
+ * capturing it is that the dashboard can then measure realised slippage against what the
+ * backtest assumed. So the error is returned rather than swallowed.
+ */
+async function pushFill({ baseUrl, runId, fill }) {
+  return request(`/api/orders/${encodeURIComponent(runId)}/fills`, {
+    baseUrl,
+    method: "POST",
+    body: { fills: [fill] },
+  });
+}
+
+/** Realised slippage for a run, once fills have been entered. */
+async function fetchSlippage({ baseUrl, runId }) {
+  return request(`/api/orders/${encodeURIComponent(runId)}/slippage`, { baseUrl });
+}
+
 /*
  * The checklist lives under one key per run id, so last week's ticks never bleed into this
  * week's list, and an old run reopened later still shows what was done at the time.
@@ -124,6 +145,8 @@ self.swingbot = {
   request,
   fetchLatestOrders,
   pushPlaced,
+  pushFill,
+  fetchSlippage,
   loadPlaced,
   savePlaced,
   orderId,
