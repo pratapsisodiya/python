@@ -51,7 +51,12 @@ function autoNum(value) {
   if (Number.isInteger(value)) return value.toLocaleString();
   const abs = Math.abs(value);
   const digits = abs >= 100 ? 1 : abs >= 1 ? 2 : 4;
-  return Number(value.toFixed(digits)).toString();
+  // Group the thousands here too. A column of notionals where 490320 reads "490,320" and
+  // 4453333.3 reads "4453333.3" is a column you cannot scan: the eye compares digit
+  // counts, and the one row that happens to be fractional is the one it misreads.
+  return Number(value.toFixed(digits)).toLocaleString(undefined, {
+    maximumFractionDigits: digits,
+  });
 }
 
 let toastTimer = null;
@@ -562,6 +567,14 @@ async function loadHealth() {
     node.append(cell("div", health.data.bias_warning, "banner warn"));
   }
 
+  // Where the prices came from, above everything else in this section. Every other number
+  // on this dashboard is downstream of it: a Sharpe computed on generated prices is a
+  // measurement of the generator, and nothing else here would tell you that.
+  const prov = health.data.provenance;
+  if (prov && prov.n_tickers) {
+    node.append(cell("div", prov.verdict, `banner ${prov.clean ? "ok" : "err"}`));
+  }
+
   const facts = document.createElement("dl");
   facts.className = "facts";
   const add = (label, value) => {
@@ -576,6 +589,10 @@ async function loadHealth() {
     ? `decide ${health.data.latest_decision} → enter ${health.data.latest_entry} → exit ${health.data.latest_exit}`
     : NBSP_DASH);
   add("Bars", health.data.ready ? `${health.data.n_bars.toLocaleString()} across ${health.data.n_tickers} tickers` : NBSP_DASH);
+  if (prov && prov.n_tickers) {
+    const sources = Object.entries(prov.sources).map(([k, v]) => `${k} ${v}`).join(" · ");
+    add("Price sources", sources || "unknown");
+  }
   add("Round-trip cost", `long ${num(health.costs.round_trip_long_bps, 1)} bps · short ${num(health.costs.round_trip_short_bps, 1)} bps (as ${health.costs.short_instrument})`);
   add("Forecast blend", `${pct(health.blend.price, 0)} price / ${pct(health.blend.news, 0)} news`);
   add("News backend", health.nlp_backend);
@@ -584,6 +601,40 @@ async function loadHealth() {
     add("News cache", `${health.news_cache.entries} entries, ${health.news_cache.failed} failed, ${num(health.news_cache.total_spend_usd, 2)} USD spent`);
   }
   node.append(facts);
+
+  // What shorting needs in capital. A weekly short on NSE is a single-stock future, and
+  // futures trade in indivisible exchange-set lots — so a per-name weight cap puts a hard
+  // floor under the account size at which the short sleeve can exist at all. Learning
+  // that here beats learning it from a rejected order on a Monday morning.
+  const shorting = health.shorting;
+  if (shorting && Object.keys(shorting).length) {
+    node.append(cell("h3", "Shorting: what it needs in capital"));
+    if (!shorting.available) {
+      node.append(cell("div", shorting.reason || "unavailable", "banner warn"));
+    } else {
+      const ok = shorting.n_tradeable >= 7;
+      node.append(cell("div", shorting.verdict, `banner ${ok ? "ok" : "err"}`));
+      const s = document.createElement("dl");
+      s.className = "facts";
+      const put = (k, v) => { s.append(cell("dt", k)); s.append(cell("dd", v)); };
+      put("Shortable names", `${shorting.n_tradeable} of ${shorting.n_shortable} fit the ${pct(shorting.max_weight, 0)} cap at ${autoNum(shorting.equity)} of equity`);
+      put("Smallest workable account", autoNum(shorting.minimum_equity_for_any));
+      if (shorting.n_no_futures) {
+        put("No futures contract", `${shorting.n_no_futures} universe name(s) — long-only regardless of the model`);
+      }
+      put("Lot snapshot", shorting.snapshot_date || NBSP_DASH);
+      node.append(s);
+
+      const blocked = (shorting.blocked || []).slice(0, 10);
+      if (blocked.length) {
+        node.append(cell("p", "Cheapest lots, and the equity each one needs:", "muted small"));
+        const bwrap = document.createElement("div");
+        bwrap.className = "scroll";
+        renderRowsTable(bwrap, blocked);
+        node.append(bwrap);
+      }
+    }
+  }
 
   node.append(cell("h3", "Packages"));
   const wrap = document.createElement("div");

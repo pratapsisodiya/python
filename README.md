@@ -331,7 +331,7 @@ Then open <http://127.0.0.1:8765> in your browser. Five tabs:
 | **Run it** | Buttons for the demo, a backtest, this week's signal, and the weekly refresh. The pipeline's log streams live while it works, so a slow backtest shows you what it's doing. |
 | **Honesty checks** | The verdicts from the most recent backtest — the leak check, the "does news actually help" comparison, the deflated Sharpe, the overfitting probability. **Read this tab before you trust any number on the others.** |
 | **Run history** | Every run you've ever done, with a link to its report and a one-click copy of the `--use-model` command that reproduces it exactly. |
-| **Health** | Data coverage, the trading calendar, costs per round trip, which AI backend is set, and the survivorship-bias warning if it applies. |
+| **Health** | Where your prices came from and how many of them nobody actually observed, data coverage, the trading calendar, costs per round trip, how much capital shorting needs before it's even possible, which AI backend is set, and the survivorship-bias warning if it applies. |
 
 Ticking an order off marks it in the run folder, so the record of what you actually placed
 lives alongside everything else about that week.

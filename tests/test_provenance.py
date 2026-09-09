@@ -277,6 +277,69 @@ def test_a_partly_generated_dataset_names_the_invented_symbols(tmp_path):
     )
 
 
+# --------------------------------------------------------------------------------------
+# `doctor`, which is where a user asks whether their setup is sound
+# --------------------------------------------------------------------------------------
+
+
+def test_doctor_says_where_the_prices_came_from(tmp_path):
+    """Coverage without provenance is a volume statistic, not a truth statement.
+
+    `doctor` could report 128 tickers and 272,000 bars while every one of them came out of
+    a random-walk generator. It is a fact about the dataset rather than about a particular
+    week, so it belongs here beside the calendar and not only in a run's caveat list.
+    """
+    from swingbot.config import load_config
+    from swingbot.pipeline import generate_demo_data
+    from swingbot.service import doctor_report
+
+    cfg = load_config("us", set_values=[f"run.data_dir={tmp_path}", "universe.max_names=8"])
+    generate_demo_data(cfg, years=3, n_names=8)
+
+    prov = doctor_report(cfg).provenance
+
+    assert prov["sources"] == {"synthetic-csv": prov["n_tickers"]}
+    assert prov["n_real"] == 0
+    assert prov["clean"] is False
+    assert "DEMO DATA" in prov["verdict"]
+
+
+def test_doctor_says_so_plainly_when_every_price_is_real(tmp_path):
+    """The other half of the check: a clean dataset must be recognisable as clean.
+
+    A verdict that only ever warns is one nobody reads. This is the case the India profile
+    now produces, and it has to be distinguishable from "we never asked".
+    """
+    from swingbot.config import load_config
+    from swingbot.data import load_universe
+    from swingbot.service import doctor_report
+
+    cfg = load_config(
+        "us",
+        set_values=[
+            f"run.data_dir={tmp_path}",
+            "data.providers=[csv]",
+            "data.start=2019-01-02",
+            "universe.max_names=12",
+            "features.min_names_per_week=6",
+        ],
+    )
+    # Unmarked CSVs — i.e. what a real export looks like.
+    write_csv_fixture(
+        SyntheticProvider(seed=8, close_hour_utc=21).daily_bars(
+            load_universe(cfg).all_tickers(), dt.date(2019, 1, 2), END
+        ),
+        tmp_path / "us" / "csv",
+    )
+
+    prov = doctor_report(cfg).provenance
+
+    assert prov["clean"] is True
+    assert prov["n_fabricated"] == 0
+    assert prov["fabricated"] == []
+    assert prov["verdict"].startswith(f"all {prov['n_tickers']} names")
+
+
 @pytest.mark.parametrize("market", ["india"])
 def test_the_india_profile_ships_without_a_generator(market):
     """The configuration change that stops the contamination at source."""

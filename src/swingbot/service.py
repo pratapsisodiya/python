@@ -33,7 +33,7 @@ from typing import Any
 import pandas as pd
 
 from .config import Config
-from .types import Order, RunMeta, TargetPortfolio
+from .types import TICKER, Order, RunMeta, TargetPortfolio
 
 log = logging.getLogger(__name__)
 
@@ -159,6 +159,9 @@ class DoctorReport:
     n_runs: int = 0
     #: India only: what shorting via single-stock futures actually requires.
     shorting: dict[str, Any] = field(default_factory=dict)
+    #: Where the prices came from: ``{"sources": {provider: n_tickers}, "fabricated":
+    #: [...], "n_real": int, "verdict": str}``. Empty when the data would not load.
+    provenance: dict[str, Any] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------------------
@@ -882,6 +885,7 @@ def doctor_report(cfg: Config) -> DoctorReport:
             report.latest_entry = str(grid[-1].entry_session)
             report.latest_exit = str(grid[-1].exit_session)
         report.bias_warning = getattr(universe, "bias_warning", lambda: None)() or ""
+        report.provenance = _provenance(bars)
     except Exception as exc:
         report.data_error = str(exc)
 
@@ -916,6 +920,50 @@ def doctor_report(cfg: Config) -> DoctorReport:
 # --------------------------------------------------------------------------------------
 # Small shared helpers
 # --------------------------------------------------------------------------------------
+
+
+def _provenance(bars: pd.DataFrame) -> dict[str, Any]:
+    """Which provider answered for each name, and how many prices nobody observed.
+
+    ``doctor`` is the command a user runs to ask "is my setup sound?", and until now it
+    could report 128 tickers and 272,000 bars without being able to say whether any of it
+    was real. It is a fact about the dataset, not about a particular week, so it belongs
+    here beside data coverage rather than only in a run's caveat list.
+    """
+    attribution = dict(bars.attrs.get("provider_attribution") or {})
+    fabricated = sorted(bars.attrs.get("fabricated_tickers") or [])
+    n_total = int(bars[TICKER].nunique()) if not bars.empty else 0
+
+    sources: dict[str, int] = {}
+    for source in attribution.values():
+        sources[source] = sources.get(source, 0) + 1
+
+    n_fabricated = len(fabricated)
+    n_real = max(0, n_total - n_fabricated)
+    if not attribution:
+        # Older caches predate the sidecar. Silence here would read as "all real", so say
+        # that the question is unanswered rather than answering it wrongly.
+        verdict = "unknown — this cache predates provenance tracking; refetch to establish it"
+    elif n_fabricated == 0:
+        verdict = f"all {n_total} names carry observed market data"
+    elif n_fabricated == n_total:
+        verdict = f"DEMO DATA — all {n_total} names are generated; no figure here is real"
+    else:
+        verdict = (
+            f"{n_fabricated} of {n_total} names carry GENERATED prices mixed in with real "
+            f"ones: {', '.join(fabricated[:8])}"
+            + (" …" if n_fabricated > 8 else "")
+        )
+
+    return {
+        "sources": dict(sorted(sources.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "fabricated": fabricated,
+        "n_real": n_real,
+        "n_fabricated": n_fabricated,
+        "n_tickers": n_total,
+        "clean": bool(attribution) and n_fabricated == 0,
+        "verdict": verdict,
+    }
 
 
 def _shorting_requirements(cfg: Config) -> dict[str, Any]:

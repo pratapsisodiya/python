@@ -127,6 +127,16 @@ def doctor(
             )
         if r.bias_warning:
             console.print(f"[yellow]![/yellow] {r.bias_warning}")
+
+        # Where those bars came from. "128 tickers, 272,000 bars" is a statement about
+        # volume, not about truth, and a chain that ends in a generator can answer for a
+        # renamed symbol without anything looking wrong.
+        prov = r.provenance
+        if prov:
+            sources = ", ".join(f"{k} {v}" for k, v in prov["sources"].items()) or "unknown"
+            style = "green" if prov["clean"] else "yellow"
+            console.print(f"[bold]prices[/bold] from {sources}")
+            console.print(f"   [{style}]{prov['verdict']}[/{style}]")
     else:
         console.print(f"\n[yellow]data not ready:[/yellow] {r.data_error}")
 

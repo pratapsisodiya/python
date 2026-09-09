@@ -191,6 +191,9 @@ def test_health_reports_the_environment(client):
     # Two runs exist on disk; a dashboard that reported zero would look broken.
     assert payload["n_runs"] == 2
     assert any(row["package"] == "pandas" for row in payload["packages"])
+    # The provenance key is part of the shape whether or not data loaded, so the dashboard
+    # can read it without guarding on data readiness.
+    assert "provenance" in payload["data"]
 
 
 def test_latest_orders_carries_every_field_the_extension_reads(client):

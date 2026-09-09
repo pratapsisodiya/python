@@ -228,7 +228,14 @@ def build_app(
                 "latest_entry": report.latest_entry,
                 "latest_exit": report.latest_exit,
                 "bias_warning": report.bias_warning,
+                "provenance": report.provenance,
             },
+            # What shorting costs in capital rather than in basis points. On NSE a weekly
+            # short is a single-stock future, futures trade in indivisible lots, and one
+            # lot of the cheapest name is several lakh — so under a per-name cap there is
+            # an account size below which the short sleeve cannot exist. The CLI has said
+            # this since `doctor` learned it; the dashboard should not be the quieter one.
+            "shorting": report.shorting,
             "news_cache": report.news_cache,
             "n_trial_configs": report.n_trial_configs,
             "n_runs": report.n_runs,

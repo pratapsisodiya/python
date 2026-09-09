@@ -131,6 +131,7 @@ code { font-family: var(--mono); font-size: 0.92em; }
 }
 .banner.warn { background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn-fg); }
 .banner.err { background: var(--err-bg); border: 1px solid var(--err-line); color: var(--err-fg); }
+.banner.ok { background: var(--ok-bg); border: 1px solid var(--ok-line); color: var(--ok-fg); }
 
 .notes {
   margin: 14px 0;
