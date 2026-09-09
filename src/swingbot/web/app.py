@@ -94,7 +94,10 @@ class FillRequest(BaseModel):
     """
 
     client_order_id: str
-    placed: bool = True
+    #: ``None`` means "leave the tick alone". A fill and a tick are separate facts, and a
+    #: default of ``True`` here would let clearing a mistyped price silently un-tick an
+    #: order that was, in fact, placed.
+    placed: bool | None = None
     price: float | None = None
     quantity: float | None = None
 
@@ -368,10 +371,17 @@ def build_app(
         record = read_execution_record(directory)
         for fill in body.fills:
             entry = record.setdefault(fill.client_order_id, {})
-            entry["placed"] = fill.placed
-            if fill.price is not None:
-                entry["price"] = float(fill.price)
-                entry["at"] = _now()
+            if fill.placed is not None:
+                entry["placed"] = fill.placed
+            if "price" in fill.model_fields_set:
+                # An explicit null clears a mistyped price. Omitting the field leaves it,
+                # so a caller updating only the tick cannot erase a recorded fill.
+                if fill.price is None:
+                    entry.pop("price", None)
+                    entry.pop("at", None)
+                else:
+                    entry["price"] = float(fill.price)
+                    entry["at"] = _now()
             if fill.quantity is not None:
                 entry["quantity"] = float(fill.quantity)
         write_execution_record(directory, run_id, record)
@@ -387,6 +397,44 @@ def build_app(
         report = analyse_fills(detail["orders"], read_execution_record(directory))
         report.run_id = detail["run_id"]
         return report.to_dict()
+
+    @app.get("/api/tca")
+    def tca(
+        market: str | None = None,
+        limit: int = Query(default=26, ge=1, le=200),
+    ) -> dict[str, Any]:
+        """Realised execution cost across every week you have recorded fills for.
+
+        The single most consequential assumption in this system is the cost model. On real
+        NSE data the strategy earned +7.4%/yr gross and paid −8.3%/yr in modelled costs, so
+        the sign of the result is decided by a number nobody had measured. One week's
+        slippage is noise. A run of weeks against the same assumption is evidence, and it
+        is the only thing here that can tell you the model is wrong for *your* broker.
+        """
+        from ..tca import analyse_fills
+
+        wanted = market or app.state.cfg.market_profile.name
+        weeks: list[dict[str, Any]] = []
+        for meta in list_runs(app.state.runs_dir, limit=500):
+            if meta.get("command") != "signal" or meta.get("market") != wanted:
+                continue
+            directory = Path(app.state.runs_dir) / meta.get("run_id", "")
+            if not directory.exists():
+                continue
+            detail = run_detail(directory)
+            report = analyse_fills(detail["orders"], read_execution_record(directory))
+            if not report.fills:
+                continue  # A week you never recorded fills for says nothing either way.
+            report.run_id = detail["run_id"]
+            row = report.to_dict()
+            row.pop("fills", None)  # The history view is one line per week, not per fill.
+            row["entry_session"] = (detail.get("book") or {}).get("entry_session", "")
+            weeks.append(row)
+            if len(weeks) >= limit:
+                break
+
+        weeks.reverse()  # Oldest first, so the series reads left to right.
+        return {"market": wanted, "weeks": weeks, "summary": _tca_summary(weeks)}
 
     # -------------------------------------------------------------------------------- jobs
 
@@ -516,6 +564,84 @@ def write_execution_record(directory: Path, run_id: str, record: dict[str, dict]
 
 def placed_ids(record: dict[str, dict]) -> list[str]:
     return sorted(k for k, v in record.items() if v.get("placed"))
+
+
+def _tca_summary(weeks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pool the recorded weeks into one verdict about the cost model.
+
+    Notional-weighted rather than a mean of weekly averages: a week where you traded
+    ₹30 lakh should not count the same as one where you traded ₹3 lakh, and averaging
+    the averages is how a small badly-executed week comes to dominate the conclusion.
+
+    The verdict deliberately refuses to draw one below four weeks. Weekly slippage is
+    dominated by which way the open happened to gap, and a two-week sample saying "your
+    broker is cheap" is the kind of number that gets acted on and should not exist.
+    """
+    if not weeks:
+        return {
+            "n_weeks": 0,
+            "verdict": "no fills recorded yet — enter what your orders actually filled at "
+            "and this becomes a measurement instead of an assumption",
+        }
+
+    notional = sum(w.get("total_notional") or 0.0 for w in weeks)
+    cost = sum(w.get("slippage_cost") or 0.0 for w in weeks)
+    realised = (cost / notional) * 10_000 if notional else 0.0
+
+    expected_weeks = [w for w in weeks if w.get("weighted_expected_bps") is not None]
+    expected_notional = sum(w.get("total_notional") or 0.0 for w in expected_weeks)
+    expected = (
+        sum(
+            (w["weighted_expected_bps"] or 0.0) * (w.get("total_notional") or 0.0)
+            for w in expected_weeks
+        )
+        / expected_notional
+        if expected_notional
+        else None
+    )
+    surprise = None if expected is None else realised - expected
+
+    n = len(weeks)
+    if n < 4:
+        verdict = (
+            f"{n} week(s) recorded — too few to say anything about the cost model. "
+            "Weekly slippage is mostly which way the open gapped; four weeks is the "
+            "point at which a run of them starts to mean something."
+        )
+    elif surprise is None:
+        verdict = (
+            f"{realised:.1f} bps paid across {n} weeks, but these runs carry no modelled "
+            "expectation to compare against. Re-run the signal so orders.csv carries "
+            "expected_slip_bps."
+        )
+    elif surprise > 15:
+        verdict = (
+            f"you are paying {realised:.1f} bps against a model that expected "
+            f"{expected:.1f} — {surprise:+.1f} bps worse, over {n} weeks. The backtest is "
+            "understating what this strategy costs you, so its results are optimistic by "
+            "roughly that much on every round trip."
+        )
+    elif surprise < -15:
+        verdict = (
+            f"you are paying {realised:.1f} bps against a model that expected "
+            f"{expected:.1f} — {surprise:+.1f} bps better, over {n} weeks. The backtest is "
+            "charging you more than your broker does, so its results are conservative."
+        )
+    else:
+        verdict = (
+            f"{realised:.1f} bps paid against {expected:.1f} bps modelled over {n} weeks "
+            f"({surprise:+.1f}). The cost model is holding up."
+        )
+
+    return {
+        "n_weeks": n,
+        "total_notional": notional,
+        "slippage_cost": cost,
+        "realised_bps": realised,
+        "expected_bps": expected,
+        "surprise_bps": surprise,
+        "verdict": verdict,
+    }
 
 
 def _latest_signal_dir(runs_dir: Path | str, market: str) -> Path | None:

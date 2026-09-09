@@ -150,11 +150,46 @@ def test_membership_respects_the_start_date():
 
 
 def test_snapshot_universe_is_flagged_as_biased():
-    """A file with no delisting history must say so rather than inflate results quietly."""
+    """A file with no real delisting history must say so rather than inflate results."""
     universe = UniverseFile("config/universe/nifty200.csv")
     assert universe.is_survivorship_biased()
     warning = universe.bias_warning()
     assert warning and "survivorship" in warning.lower()
+
+
+def test_one_exit_does_not_disarm_the_survivorship_warning(tmp_path):
+    """The defect: the check used to be "any end_date at all", and one row silenced it.
+
+    Giving LTIM a genuine end date — it merged away — flipped nifty200.csv from
+    survivorship-biased to clean while its other 128 names were still precisely the
+    survivors of the index as it stands today. A warning that a single edited line can
+    switch off is not a warning, and this is the shape of dataset it was written for.
+    """
+    rows = ["ticker,name,sector,start_date,end_date"]
+    rows += [f"T{i:03d},Name {i},Tech,2015-01-01," for i in range(40)]
+    rows[1] = "T000,Name 0,Tech,2015-01-01,2020-06-30"  # exactly one exit
+    path = tmp_path / "mostly_survivors.csv"
+    path.write_text("\n".join(rows) + "\n")
+
+    universe = UniverseFile(path)
+    assert universe.n_exits() == 1
+    assert universe.is_survivorship_biased(), "one exit in 40 names is not membership history"
+    assert "only 1 exit(s) across 40 names" in (universe.bias_warning() or "")
+
+
+def test_a_file_with_real_membership_history_is_not_flagged(tmp_path):
+    """The other side, so the check can still come back clean and mean it."""
+    rows = ["ticker,name,sector,start_date,end_date"]
+    for i in range(40):
+        end = "2020-06-30" if i < 6 else ""
+        rows.append(f"T{i:03d},Name {i},Tech,2015-01-01,{end}")
+    path = tmp_path / "point_in_time.csv"
+    path.write_text("\n".join(rows) + "\n")
+
+    universe = UniverseFile(path)
+    assert universe.n_exits() == 6
+    assert not universe.is_survivorship_biased()
+    assert universe.bias_warning() is None
 
 
 # ----------------------------------------------------------------------- execution

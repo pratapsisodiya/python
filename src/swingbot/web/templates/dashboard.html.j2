@@ -21,6 +21,7 @@
     <button class="tab active" data-panel="week" role="tab">This week</button>
     <button class="tab" data-panel="run" role="tab">Run it</button>
     <button class="tab" data-panel="checks" role="tab">Honesty checks</button>
+    <button class="tab" data-panel="costs" role="tab">Costs</button>
     <button class="tab" data-panel="history" role="tab">Run history</button>
     <button class="tab" data-panel="health" role="tab">Health</button>
   </nav>
@@ -63,7 +64,14 @@
     <div class="scroll"><table id="orders-table"><thead><tr>
       <th class="col-tick"></th><th>Ticker</th><th>Side</th><th class="num">Quantity</th>
       <th>Instrument</th><th class="num">Est. price</th><th class="num">Est. value</th>
+      <th class="num">Filled at</th><th class="num">Slippage</th>
     </tr></thead><tbody id="orders-body"></tbody></table></div>
+    <p class="muted small">
+      <strong>Filled at</strong> is optional and is the only way this system ever learns
+      what trading really costs you. Type the price you got; the slippage against the
+      estimate above appears beside it, and the <strong>Costs</strong> tab pools it across
+      weeks. Positive is always a cost, on a buy and on a sell alike.
+    </p>
 
     <h2>Target book</h2>
     <p class="muted small">
@@ -155,6 +163,23 @@
     <div id="checks-pbo"></div>
     <p class="muted small" id="checks-run-link"></p>
   </div>
+</section>
+
+<!-- ------------------------------------------------------------------------- costs -->
+<section id="panel-costs" class="panel">
+  <h2>What execution actually cost you</h2>
+  <p class="muted small">
+    Every backtest charges a <em>modelled</em> cost and sweeps it to show the result does
+    not hinge on the exact figure. That is honest, and it is still an assumption. On real
+    NSE data this strategy earned +7.4%/yr before costs and paid −8.3%/yr in modelled ones,
+    so the sign of the whole thing is decided by a number nobody had measured. Enter what
+    your orders really filled at, on the <strong>This week</strong> tab, and these become
+    measurements.
+  </p>
+  <div id="costs-verdict"></div>
+  <div id="costs-kpis" class="kpis"></div>
+  <h3>Week by week</h3>
+  <div class="scroll" id="costs-weeks"></div>
 </section>
 
 <!-- ------------------------------------------------------------------- run history -->

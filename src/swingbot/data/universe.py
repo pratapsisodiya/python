@@ -151,15 +151,45 @@ class UniverseFile:
         ended = self._frame.loc[self._frame["end_date"].notna()]
         return dict(zip(ended[TICKER], ended["end_date"].dt.date, strict=True))
 
+    #: Below this share of dated exits a file is still treated as a present-day snapshot.
+    #:
+    #: Any nonzero threshold is a judgement, so here is the one behind this number. A
+    #: broad index turns over on the order of 5–10% of its members a year, so a file
+    #: covering several years of genuine membership history carries exits in the tens of
+    #: percent. 5% is roughly one year's turnover: below it, a file cannot be spanning a
+    #: backtest-length period and recording what actually left.
+    SURVIVORSHIP_EXIT_SHARE = 0.05
+
+    def n_exits(self) -> int:
+        """How many names in the file are recorded as having left the universe."""
+        if not self._has_end_column:
+            return 0
+        return int(self._frame["end_date"].notna().sum())
+
     def is_survivorship_biased(self) -> bool:
-        """True when the file carries no membership history at all."""
-        return not self._has_end_column or bool(self._frame["end_date"].isna().all())
+        """True when the file is a present-day snapshot rather than membership history.
+
+        Not simply "has no end dates at all", which is the version this started as and
+        which turned out to be disarmable by one row: adding a single ``end_date`` to
+        nifty200.csv — a genuine change, LTIM merging away — silenced the warning on a
+        file where the other 128 names were still exactly the survivors of the index as
+        it stands today. The strongest claim a file with one exit supports is that
+        somebody edited one line, and the warning existed to catch precisely the dataset
+        it then stopped firing on.
+        """
+        return self.n_exits() < max(1, int(len(self._frame) * self.SURVIVORSHIP_EXIT_SHARE))
 
     def bias_warning(self) -> str | None:
         if not self.is_survivorship_biased():
             return None
+        n_exits, n_total = self.n_exits(), len(self._frame)
+        history = (
+            "has no delisting history"
+            if not n_exits
+            else f"records only {n_exits} exit(s) across {n_total} names"
+        )
         return (
-            f"Universe {self.path.name} has no delisting history, so it is a present-day "
+            f"Universe {self.path.name} {history}, so it is effectively a present-day "
             "snapshot. Backtest results from it are survivorship-biased and optimistic. "
             "Replace it with a point-in-time membership file before trusting any number."
         )

@@ -261,6 +261,18 @@ input[type="number"], select {
   min-width: 0;
 }
 input[type="number"] { width: 9em; }
+/* Inside the order table: narrow, right-aligned, and quiet until it holds a value, so a
+   column of empty optional inputs does not compete with the order data beside it. */
+input.fill {
+  width: 7em;
+  text-align: right;
+  background: transparent;
+  border-color: var(--line);
+}
+input.fill:focus, input.fill:not(:placeholder-shown) {
+  background: var(--bg);
+  border-color: var(--line-strong);
+}
 
 button.primary {
   font: inherit;

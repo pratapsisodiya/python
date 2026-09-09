@@ -234,6 +234,30 @@ function renderWeek() {
 
     tr.append(cell("td", money(order.est_price, payload.currency), "num"));
     tr.append(cell("td", money(order.est_value, payload.currency), "num"));
+
+    // What it actually filled at. Optional, and the only route by which the modelled
+    // cost — the assumption that decides whether this strategy makes or loses money —
+    // ever gets checked against reality.
+    const recorded = (payload.execution || {})[id] || {};
+    const fillCell = document.createElement("td");
+    fillCell.className = "num";
+    const input = document.createElement("input");
+    input.type = "number";
+    input.step = "any";
+    input.className = "fill";
+    input.placeholder = "fill price";
+    input.title = "What this order actually filled at";
+    if (recorded.price !== undefined && recorded.price !== null) input.value = recorded.price;
+    input.addEventListener("change", () => recordFill(payload.run_id, id, input.value));
+    fillCell.append(input);
+    tr.append(fillCell);
+
+    const slip = slippageFor(order, recorded.price);
+    tr.append(cell(
+      "td",
+      slip === null ? NBSP_DASH : `${slip >= 0 ? "+" : ""}${slip.toFixed(0)} bps`,
+      `num ${slip === null ? "" : slip > 0 ? "neg" : "pos"}`.trim(),
+    ));
     body.append(tr);
   }
 
@@ -268,6 +292,47 @@ function renderWeek() {
   if (detail?.has_model) {
     link.append(cell("span", ` · reproduce it exactly: swingbot signal --market ${state.market} --use-model ${payload.run_id}`));
   }
+}
+
+/**
+ * Signed so positive is always a cost: a buy above the estimate and a sell below it both
+ * come back positive. Without that convention a book of mixed sides averages toward zero
+ * however badly it executed, which is the one answer that must not be possible here.
+ *
+ * Mirrors `swingbot.tca.slippage_bps`. The server recomputes it — this is only so the
+ * number appears the instant you type, rather than after a round trip.
+ */
+function slippageFor(order, fillPrice) {
+  const reference = Number(order.est_price);
+  const fill = Number(fillPrice);
+  if (!Number.isFinite(reference) || !Number.isFinite(fill) || reference <= 0 || fill <= 0) {
+    return null;
+  }
+  const direction = String(order.side).toLowerCase() === "buy" ? 1 : -1;
+  return (direction * (fill - reference) / reference) * 10000;
+}
+
+async function recordFill(runId, orderId, value) {
+  const price = value === "" ? null : Number(value);
+  if (price !== null && (!Number.isFinite(price) || price <= 0)) {
+    toast("A fill price has to be a positive number.");
+    return;
+  }
+  // `placed` is sent only when a price arrives: recording a fill implies the order was
+  // placed, but clearing a mistyped price must not un-tick an order that was.
+  const fill = { client_order_id: orderId, price };
+  if (price !== null) fill.placed = true;
+  try {
+    await api(`/api/orders/${encodeURIComponent(runId)}/fills`, {
+      method: "POST",
+      body: { fills: [fill] },
+    });
+  } catch (error) {
+    toast(error.message);
+    return;
+  }
+  await loadWeek();
+  loadCosts();
 }
 
 async function togglePlaced(runId, orderId, checked) {
@@ -643,6 +708,68 @@ async function loadHealth() {
   node.append(wrap);
 }
 
+// --------------------------------------------------------------------------- costs
+
+/**
+ * Realised execution cost, pooled across every week you have recorded fills for.
+ *
+ * One week's slippage is mostly which way the open gapped. A run of weeks against the
+ * same modelled assumption is the only evidence here that can say the cost model — the
+ * number that decides whether this strategy makes or loses money — is wrong for your
+ * broker.
+ */
+async function loadCosts() {
+  let payload;
+  try {
+    payload = await api(`/api/tca?market=${encodeURIComponent(state.market)}`);
+  } catch (error) {
+    toast(error.message);
+    return;
+  }
+
+  const summary = payload.summary || {};
+  const verdict = $("costs-verdict");
+  verdict.textContent = "";
+  const enough = summary.n_weeks >= 4;
+  const bad = enough && summary.surprise_bps !== null && summary.surprise_bps > 15;
+  verdict.append(cell(
+    "div",
+    summary.verdict,
+    `banner ${!enough ? "readonly" : bad ? "err" : "ok"}`,
+  ));
+
+  const kpis = $("costs-kpis");
+  kpis.textContent = "";
+  if (summary.n_weeks) {
+    kpi(kpis, "Weeks recorded", String(summary.n_weeks));
+    kpi(kpis, "Paid", `${num(summary.realised_bps, 1)} bps`, {
+      sub: "notional-weighted, so your biggest trade counts most",
+    });
+    kpi(kpis, "Model expected", summary.expected_bps === null
+      ? NBSP_DASH : `${num(summary.expected_bps, 1)} bps`);
+    if (summary.surprise_bps !== null && summary.surprise_bps !== undefined) {
+      kpi(kpis, "Surprise", `${summary.surprise_bps >= 0 ? "+" : ""}${num(summary.surprise_bps, 1)} bps`, {
+        className: summary.surprise_bps > 0 ? "neg" : "pos",
+        sub: summary.surprise_bps > 0 ? "worse than the backtest assumed" : "better than the backtest assumed",
+      });
+    }
+    kpi(kpis, "Slippage paid", money(summary.slippage_cost, state.week?.payload?.currency));
+  }
+
+  const weeks = (payload.weeks || []).map((w) => ({
+    entry_session: w.entry_session || w.run_id,
+    orders: w.n_orders,
+    filled: w.n_filled,
+    coverage: pct(w.coverage, 0),
+    paid_bps: w.weighted_slippage_bps,
+    expected_bps: w.weighted_expected_bps,
+    surprise_bps: w.surprise_bps,
+    notional: w.total_notional,
+    cost: w.slippage_cost,
+  }));
+  renderRowsTable($("costs-weeks"), weeks);
+}
+
 // -------------------------------------------------------------------------- wiring
 
 for (const tab of document.querySelectorAll(".tab")) {
@@ -668,6 +795,7 @@ function refreshAll() {
   loadChecks();
   loadHistory();
   loadHealth();
+  loadCosts();
   loadJobs();
 }
 

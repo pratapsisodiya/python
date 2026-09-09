@@ -355,6 +355,157 @@ def test_slippage_refuses_an_implausible_fill(client):
     assert any("typo" in line for line in report["dropped"])
 
 
+def test_clearing_a_price_leaves_the_tick_alone(client):
+    """The mirror of the test above, and the reason ``placed`` defaults to "unchanged".
+
+    A fill and a tick are separate facts. With ``placed`` defaulting to ``True`` on the
+    request model, correcting a mistyped price by clearing the box would have re-ticked —
+    or, sending ``placed: false`` alongside, un-ticked — an order whose placement status
+    the user never touched.
+    """
+    client.post(
+        f"/api/orders/{RUN_ID}/fills",
+        json={"fills": [{"client_order_id": "20260908-AAA", "price": 101.25, "placed": True}]},
+    )
+    # Clear the price only.
+    client.post(
+        f"/api/orders/{RUN_ID}/fills",
+        json={"fills": [{"client_order_id": "20260908-AAA", "price": None}]},
+    )
+
+    record = client.get(f"/api/orders/{RUN_ID}/placed").json()
+    assert record["placed"] == ["20260908-AAA"], "clearing a price must not un-tick"
+    assert "price" not in record["orders"]["20260908-AAA"], "the price should be gone"
+
+
+def test_a_tick_only_update_never_erases_a_recorded_fill(client):
+    """Omitting ``price`` leaves the stored one, so a partial update cannot destroy it."""
+    client.post(
+        f"/api/orders/{RUN_ID}/fills",
+        json={"fills": [{"client_order_id": "20260908-AAA", "price": 101.25}]},
+    )
+    client.post(
+        f"/api/orders/{RUN_ID}/fills",
+        json={"fills": [{"client_order_id": "20260908-AAA", "placed": True}]},
+    )
+
+    record = client.get(f"/api/orders/{RUN_ID}/placed").json()
+    assert record["orders"]["20260908-AAA"]["price"] == pytest.approx(101.25)
+
+
+# --------------------------------------------------------------------------------------
+# Cost history — one week is noise, a run of weeks is evidence
+# --------------------------------------------------------------------------------------
+
+
+def test_cost_history_says_nothing_until_a_fill_exists(client):
+    payload = client.get("/api/tca?market=us").json()
+    assert payload["weeks"] == []
+    assert payload["summary"]["n_weeks"] == 0
+    assert "no fills recorded" in payload["summary"]["verdict"]
+
+
+def test_cost_history_refuses_to_draw_a_conclusion_from_one_week(client):
+    """The judgement that keeps this honest.
+
+    Weekly slippage is dominated by which way the open happened to gap. A single week
+    saying "your broker is cheap" is exactly the kind of number that gets acted on, so
+    the verdict names the sample size instead of reporting a comparison.
+    """
+    client.post(
+        f"/api/orders/{RUN_ID}/fills",
+        json={"fills": [{"client_order_id": "20260908-AAA", "price": 101.0}]},
+    )
+    payload = client.get("/api/tca?market=us").json()
+
+    assert len(payload["weeks"]) == 1
+    week = payload["weeks"][0]
+    assert week["weighted_slippage_bps"] == pytest.approx(100.0, abs=0.5)
+    assert "fills" not in week, "the history view is one row per week, not per fill"
+    assert payload["summary"]["n_weeks"] == 1
+    assert "too few" in payload["summary"]["verdict"]
+
+
+def test_cost_history_pools_weeks_by_notional(tmp_path):
+    """Weighted, not a mean of weekly means.
+
+    A week where you traded ten times as much has to count ten times as much. Averaging
+    the weekly averages is how one small, badly-executed week comes to decide what the
+    cost model is judged against.
+    """
+    runs = tmp_path / "runs"
+    for week in range(4):
+        run_id = f"2026090{week + 1}T163000-us-signal-aaaaaaaa"
+        directory = runs / run_id
+        directory.mkdir(parents=True)
+        # Week 0 trades 10x the size of the others and executes at 10 bps; the rest
+        # execute at 110 bps. A plain mean of the four weeks gives 85 bps; weighting by
+        # notional gives ~33, and the two answers imply opposite verdicts about the model.
+        quantity, price = (1000, 100.10) if week == 0 else (100, 101.10)
+        (directory / "orders.csv").write_text(
+            "ticker,side,quantity,order_type,instrument,est_price,est_value,"
+            "client_order_id,expected_slip_bps\n"
+            f"AAA,buy,{quantity},market,equity,100.0,{quantity * 100.0},X{week},40.0\n"
+        )
+        (directory / "run.json").write_text(json.dumps({
+            "run_id": run_id, "command": "signal", "market": "us",
+            "started_at": f"2026-09-0{week + 1}T16:30:00+00:00",
+        }))
+        (directory / "execution.json").write_text(json.dumps({
+            "run_id": run_id,
+            "orders": {f"X{week}": {"placed": True, "price": price}},
+        }))
+
+    cfg = load_config("us", set_values=[f"run.runs_dir={runs}", "data.providers=[csv]"])
+    with TestClient(create_app(cfg)) as client:
+        summary = client.get("/api/tca?market=us").json()["summary"]
+
+    assert summary["n_weeks"] == 4
+    assert summary["realised_bps"] == pytest.approx(33.2, abs=1.0), (
+        "a mean of the weekly averages would give ~85 bps and condemn a cost model that "
+        "is in fact holding up"
+    )
+    assert summary["expected_bps"] == pytest.approx(40.0, abs=0.5)
+    assert summary["surprise_bps"] == pytest.approx(-6.8, abs=1.0)
+    assert "holding up" in summary["verdict"]
+
+
+def test_cost_history_calls_out_a_cost_model_that_is_understating(tmp_path):
+    """The finding that matters, and the reason any of this exists.
+
+    On real NSE data this strategy earned +7.4%/yr gross and paid −8.3%/yr in *modelled*
+    costs. If the model understates what a broker really charges, the backtest is
+    optimistic by that much on every round trip and the dashboard must say so.
+    """
+    runs = tmp_path / "runs"
+    for week in range(5):
+        run_id = f"2026090{week + 1}T163000-us-signal-bbbbbbbb"
+        directory = runs / run_id
+        directory.mkdir(parents=True)
+        (directory / "orders.csv").write_text(
+            "ticker,side,quantity,order_type,instrument,est_price,est_value,"
+            "client_order_id,expected_slip_bps\n"
+            f"AAA,buy,100,market,equity,100.0,10000.0,X{week},10.0\n"
+        )
+        (directory / "run.json").write_text(json.dumps({
+            "run_id": run_id, "command": "signal", "market": "us",
+            "started_at": f"2026-09-0{week + 1}T16:30:00+00:00",
+        }))
+        (directory / "execution.json").write_text(json.dumps({
+            "run_id": run_id,
+            # Filled 80 bps worse than the reference against a model expecting 10.
+            "orders": {f"X{week}": {"placed": True, "price": 100.80}},
+        }))
+
+    cfg = load_config("us", set_values=[f"run.runs_dir={runs}", "data.providers=[csv]"])
+    with TestClient(create_app(cfg)) as client:
+        summary = client.get("/api/tca?market=us").json()["summary"]
+
+    assert summary["surprise_bps"] == pytest.approx(70.0, abs=1.0)
+    assert "understating" in summary["verdict"]
+    assert "optimistic" in summary["verdict"]
+
+
 def test_the_checklist_refuses_an_unknown_run(client):
     response = client.post("/api/orders/nope/placed", json={"placed": ["x"]})
     assert response.status_code == 404
